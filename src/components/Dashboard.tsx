@@ -350,7 +350,7 @@ export default function Dashboard({ user, isSOSActive, onStopSOS }: DashboardPro
                     </div>
                     Trusted Contacts
                   </div>
-                  
+
                   <form onSubmit={handleAddContact} className="flex flex-col gap-3">
                     <div className="flex flex-col md:flex-row gap-3">
                     <input
