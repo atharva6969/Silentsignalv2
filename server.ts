@@ -82,12 +82,17 @@ function getTwilioClient() {
 }
 
 function getMailTransporter() {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
+  const user = process.env.SMTP_USER?.trim();
+  const pass = process.env.SMTP_PASS?.trim();
+  if (!user || !pass) return null;
+
+  const port = Number(process.env.SMTP_PORT) || 587;
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || "smtp.gmail.com",
-    port: Number(process.env.SMTP_PORT) || 587,
-    secure: false,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    host: process.env.SMTP_HOST?.trim() || "smtp.gmail.com",
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+    tls: { minVersion: "TLSv1.2" },
   });
 }
 
@@ -581,6 +586,14 @@ async function startServer() {
     }
   });
 
+  // ─── Alert Config Status ───────────────────────────────────────────────
+  app.get("/api/alerts/status", (_req: Request, res: Response) => {
+    res.json({
+      sms: Boolean(getTwilioClient()),
+      email: Boolean(getMailTransporter()),
+    });
+  });
+
   // ─── Serve Frontend ────────────────────────────────────────────────────
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -596,10 +609,10 @@ async function startServer() {
   }
 
   // ─── Start Server ──────────────────────────────────────────────────────
-  app.listen(Number(PORT), "0.0.0.0", () => {
+  app.listen(Number(PORT), "0.0.0.0", async () => {
     console.log(`✅ Silent Signal running on http://localhost:${PORT}`);
     console.log(`   NODE_ENV: ${process.env.NODE_ENV || "development"}`);
-    
+
     // Warn about missing external services
     if (
       !process.env.TWILIO_ACCOUNT_SID ||
@@ -607,9 +620,22 @@ async function startServer() {
     ) {
       console.warn("⚠️  Twilio not configured — SMS alerts will be skipped");
     }
-    if (!process.env.SMTP_USER) {
+
+    const mailer = getMailTransporter();
+    if (!mailer) {
       console.warn("⚠️  SMTP not configured — email alerts will be skipped");
+      console.warn("   Copy .env.example to .env and set SMTP_USER + SMTP_PASS");
+      console.warn("   Gmail users need an App Password: https://myaccount.google.com/apppasswords");
+    } else {
+      try {
+        await mailer.verify();
+        console.log(`✉️  SMTP ready — emails will send from ${process.env.SMTP_FROM || process.env.SMTP_USER}`);
+      } catch (err: any) {
+        console.error(`❌ SMTP verification failed: ${err.message}`);
+        console.error("   Check SMTP_USER, SMTP_PASS, and SMTP_HOST in your .env file");
+      }
     }
+
     if (!process.env.ENCRYPTION_KEY) {
       console.warn(
         "⚠️  ENCRYPTION_KEY not set — encrypted data cannot be decrypted after restart"
