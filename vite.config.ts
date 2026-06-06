@@ -24,6 +24,7 @@ export default defineConfig((_) => {
       allowedHosts: [
         'all',
         'uneclipsing-hypersensually-maris.ngrok-free.dev',
+        'silent-signal-5iz0.onrender.com',
       ],
     },
   };
