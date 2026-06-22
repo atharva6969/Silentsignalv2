@@ -558,8 +558,8 @@ export default function Dashboard({ user, isSOSActive, onStopSOS }: DashboardPro
                         
                         <div className="flex items-center gap-4">
                           {log.status === "AUDIO_CHUNK" ? (
-                            <div className="bg-zinc-50 p-2 rounded-xl border border-zinc-100 shadow-inner">
-                              <audio controls src={log.audio_url} className="h-8 w-48" />
+                            <div className="bg-zinc-50 p-3 rounded-xl border border-zinc-100 shadow-inner min-w-[280px]">
+                              <audio controls src={log.audio_url} className="w-full max-w-md" />
                             </div>
                           ) : (
                             <div className="flex items-center gap-2 bg-zinc-50 px-4 py-2 rounded-xl border border-zinc-100">

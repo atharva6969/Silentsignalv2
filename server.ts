@@ -96,22 +96,137 @@ function getMailTransporter() {
   });
 }
 
+function formatTriggerMethod(method: string): string {
+  const labels: Record<string, string> = {
+    DURESS_PIN: "Duress PIN login (silent emergency mode)",
+    GESTURE: "Secret gesture detected",
+    POWER_BUTTON_5X: "Power button pressed 5 times",
+    PANIC_TIMER: "Panic timer expired without dismissal",
+    MANUAL: "Manual SOS activation",
+    INTERVAL: "Live location update",
+  };
+  return labels[method] || method.replace(/_/g, " ");
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function buildAlertContent(
+  username: string,
+  lat: number,
+  lng: number,
+  triggerMethod: string,
+  evidenceUrl: string,
+  panicMessage?: string
+) {
+  const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
+  const timestamp = new Date().toLocaleString("en-IN", {
+    dateStyle: "full",
+    timeStyle: "long",
+    timeZone: "Asia/Kolkata",
+  });
+  const triggerLabel = formatTriggerMethod(triggerMethod);
+  const safeUser = escapeHtml(username);
+  const safeTrigger = escapeHtml(triggerLabel);
+  const safePanic = panicMessage ? escapeHtml(panicMessage) : "";
+
+  const smsBody =
+    `🚨 EMERGENCY ALERT — SILENT SIGNAL\n\n` +
+    `${username} may be in danger and needs immediate help.\n\n` +
+    `👤 Person: ${username}\n` +
+    `⚠️ Trigger: ${triggerLabel}\n` +
+    `🕐 Time: ${timestamp}\n` +
+    `📍 Location: ${lat.toFixed(6)}, ${lng.toFixed(6)}\n` +
+    `🗺️ Open in Maps: ${mapsUrl}\n` +
+    `🎙️ Listen to audio evidence: ${evidenceUrl}\n` +
+    (panicMessage ? `\nMessage: ${panicMessage}\n` : "") +
+    `\nThis is an automated emergency alert. Please respond immediately.`;
+
+  const emailSubject = `🚨 EMERGENCY — ${username} needs help NOW`;
+
+  const emailText = smsBody;
+
+  const emailHtml = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;border:3px solid #dc2626;border-radius:12px;overflow:hidden;">
+      <div style="background:#dc2626;color:#fff;padding:20px 24px;">
+        <h1 style="margin:0;font-size:22px;">🚨 EMERGENCY ALERT</h1>
+        <p style="margin:8px 0 0;opacity:0.95;font-size:15px;">Silent Signal — Someone needs immediate help</p>
+      </div>
+      <div style="padding:24px;">
+        <p style="font-size:18px;color:#111;margin:0 0 20px;">
+          <strong>${safeUser}</strong> has triggered a silent emergency alert and may be in danger.
+        </p>
+        ${safePanic ? `<p style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;color:#991b1b;margin:0 0 20px;">${safePanic}</p>` : ""}
+        <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:15px;">
+          <tr style="background:#f9fafb;">
+            <td style="padding:12px;font-weight:bold;color:#555;width:130px;">Person</td>
+            <td style="padding:12px;color:#111;font-weight:bold;">${safeUser}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px;font-weight:bold;color:#555;">Triggered via</td>
+            <td style="padding:12px;color:#111;">${safeTrigger}</td>
+          </tr>
+          <tr style="background:#f9fafb;">
+            <td style="padding:12px;font-weight:bold;color:#555;">Time</td>
+            <td style="padding:12px;color:#111;">${escapeHtml(timestamp)}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px;font-weight:bold;color:#555;">GPS Location</td>
+            <td style="padding:12px;font-family:monospace;color:#111;">${lat.toFixed(6)}, ${lng.toFixed(6)}</td>
+          </tr>
+        </table>
+        <a href="${mapsUrl}" style="display:block;text-align:center;background:#dc2626;color:#fff;text-decoration:none;padding:14px 24px;border-radius:8px;font-weight:bold;font-size:16px;margin-bottom:12px;">
+          📍 View Live Location on Google Maps
+        </a>
+        <a href="${evidenceUrl}" style="display:block;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 24px;border-radius:8px;font-weight:bold;font-size:16px;margin-bottom:20px;">
+          🎙️ Listen to Recorded Audio Evidence
+        </a>
+        <p style="color:#666;font-size:13px;line-height:1.5;margin:0;">
+          Audio recording starts automatically during an SOS. If no audio appears yet, refresh the evidence page in 10–30 seconds.
+          Please call emergency services or reach out to ${safeUser} immediately.
+        </p>
+      </div>
+      <div style="background:#f9fafb;padding:12px 24px;text-align:center;color:#888;font-size:11px;">
+        Sent automatically by Silent Signal
+      </div>
+    </div>`;
+
+  return { smsBody, emailSubject, emailText, emailHtml };
+}
+
+function getActiveShareToken(userId: number): string | null {
+  const row = db
+    .prepare(
+      `SELECT share_token FROM sos_logs
+       WHERE user_id = ? AND share_token IS NOT NULL
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(userId) as { share_token: string } | undefined;
+  return row?.share_token ?? null;
+}
+
 async function dispatchAlerts(
   contacts: any[],
   lat: number,
   lng: number,
   username: string,
   triggerMethod: string,
+  evidenceUrl: string,
   panicMessage?: string
 ) {
-  const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
-  const timestamp = new Date().toLocaleString("en-US", { timeZone: "UTC" }) + " UTC";
-  const headline = panicMessage || `EMERGENCY — ${username} triggered SOS via ${triggerMethod}`;
-
-  const smsBody =
-    `🚨 SILENT SIGNAL ALERT\n` +
-    `${headline}\nTime: ${timestamp}\n` +
-    `📍 ${mapsUrl}\nCoords: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  const { smsBody, emailSubject, emailText, emailHtml } = buildAlertContent(
+    username,
+    lat,
+    lng,
+    triggerMethod,
+    evidenceUrl,
+    panicMessage
+  );
 
   const twilioClient = getTwilioClient();
   const mailer = getMailTransporter();
@@ -161,23 +276,9 @@ async function dispatchAlerts(
           await mailer.sendMail({
             from: process.env.SMTP_FROM || process.env.SMTP_USER,
             to: contact.email,
-            subject: `🚨 EMERGENCY — ${username} needs help NOW`,
-            text: smsBody,
-            html: `
-              <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;background:#fff;border-radius:12px;border:2px solid #ef4444;">
-                <h1 style="color:#ef4444;margin-top:0;">🚨 Emergency Alert</h1>
-                <p style="font-size:16px;"><strong>${headline}</strong></p>
-                <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-                  <tr><td style="padding:8px;color:#555;font-weight:bold;">User</td><td style="padding:8px;">${username}</td></tr>
-                  <tr style="background:#f9f9f9;"><td style="padding:8px;color:#555;font-weight:bold;">Triggered Via</td><td style="padding:8px;">${triggerMethod}</td></tr>
-                  <tr><td style="padding:8px;color:#555;font-weight:bold;">Time</td><td style="padding:8px;">${timestamp}</td></tr>
-                  <tr style="background:#f9f9f9;"><td style="padding:8px;color:#555;font-weight:bold;">Coordinates</td><td style="padding:8px;font-family:monospace;">${lat.toFixed(6)}, ${lng.toFixed(6)}</td></tr>
-                </table>
-                <a href="${mapsUrl}" style="display:inline-block;background:#ef4444;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:bold;">
-                  📍 Open Live Location on Google Maps
-                </a>
-                <p style="color:#888;font-size:12px;margin-top:24px;">Sent automatically by Silent Signal.</p>
-              </div>`,
+            subject: emailSubject,
+            text: emailText,
+            html: emailHtml,
           });
           results.push(`EMAIL ✓ → ${contact.name} (${contact.email})`);
           console.log(`[EMAIL ✓] Successfully sent to ${contact.name} (${contact.email})`);
@@ -231,6 +332,12 @@ db.exec(`
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
 `);
+
+try {
+  db.exec(`ALTER TABLE sos_logs ADD COLUMN share_token TEXT`);
+} catch {
+  // Column already exists
+}
 
 // ─── Server ───────────────────────────────────────────────────────────────
 async function startServer() {
@@ -415,18 +522,26 @@ async function startServer() {
       }
 
       const encryptedCoords = encryptCoords(latitude, longitude);
+      const method = triggerMethod || "MANUAL";
+      const isNewSession = method !== "INTERVAL";
+      const shareToken = isNewSession
+        ? crypto.randomBytes(24).toString("hex")
+        : getActiveShareToken(userId) || crypto.randomBytes(24).toString("hex");
+
       const info = db
         .prepare(
-          "INSERT INTO sos_logs (user_id, encrypted_coords, status, trigger_method) VALUES (?, ?, ?, ?)"
+          "INSERT INTO sos_logs (user_id, encrypted_coords, status, trigger_method, share_token) VALUES (?, ?, ?, ?, ?)"
         )
-        .run(userId, encryptedCoords, "ACTIVE", triggerMethod || "MANUAL");
+        .run(userId, encryptedCoords, "ACTIVE", method, shareToken);
 
       const contacts = db.prepare("SELECT * FROM contacts WHERE user_id = ?").all(userId) as any[];
       const user = db.prepare("SELECT username FROM users WHERE id = ?").get(userId) as any;
       const username = user?.username || `User_${userId}`;
+      const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, "");
+      const evidenceUrl = `${appUrl}/evidence/${shareToken}`;
 
       console.log(
-        `[🚨 SOS] ${username} | method=${triggerMethod} | ${contacts.length} contacts | coords=${latitude.toFixed(6)},${longitude.toFixed(6)}`
+        `[🚨 SOS] ${username} | method=${method} | ${contacts.length} contacts | coords=${latitude.toFixed(6)},${longitude.toFixed(6)}`
       );
       
       // Log each contact's details
@@ -434,22 +549,25 @@ async function startServer() {
         console.log(`  Contact ${idx + 1}: name=${c.name}, phone=${c.phone}, email=${c.email}`);
       });
 
-      // Dispatch alerts to contacts (background task, don't block response)
-      dispatchAlerts(
-        contacts,
-        latitude,
-        longitude,
-        username,
-        triggerMethod || "MANUAL",
-        panicMessage
-      )
-        .then((results) => {
-          console.log(`[✓ ALERTS DISPATCHED] ${results.length} attempts`);
-          results.forEach((r) => console.log(`  ${r}`));
-        })
-        .catch((err: any) => {
-          console.error(`[❌ ALERT DISPATCH ERROR]`, err.message || err);
-        });
+      // Only alert trusted contacts on initial SOS — not on 30s location pings
+      if (isNewSession) {
+        dispatchAlerts(
+          contacts,
+          latitude,
+          longitude,
+          username,
+          method,
+          evidenceUrl,
+          panicMessage
+        )
+          .then((results) => {
+            console.log(`[✓ ALERTS DISPATCHED] ${results.length} attempts`);
+            results.forEach((r) => console.log(`  ${r}`));
+          })
+          .catch((err: any) => {
+            console.error(`[❌ ALERT DISPATCH ERROR]`, err.message || err);
+          });
+      }
 
       res.json({ success: true, logId: info.lastInsertRowid });
     } catch (err: any) {
@@ -535,9 +653,16 @@ async function startServer() {
       }
 
       const audioBase64 = (req.body as Buffer).toString("base64");
+      const shareToken = getActiveShareToken(Number(userId));
       db.prepare(
-        "INSERT INTO sos_logs (user_id, audio_url, status, trigger_method) VALUES (?, ?, ?, ?)"
-      ).run(Number(userId), `data:audio/webm;base64,${audioBase64}`, "AUDIO_CHUNK", "RECORDING");
+        "INSERT INTO sos_logs (user_id, audio_url, status, trigger_method, share_token) VALUES (?, ?, ?, ?, ?)"
+      ).run(
+        Number(userId),
+        `data:audio/webm;base64,${audioBase64}`,
+        "AUDIO_CHUNK",
+        "RECORDING",
+        shareToken
+      );
 
       console.log(`[✓ AUDIO] Received audio chunk for user ${userId}`);
       res.json({ success: true });
@@ -584,6 +709,156 @@ async function startServer() {
       console.error("Get logs error:", err);
       res.status(500).json({ error: "Failed to fetch logs" });
     }
+  });
+
+  // ─── Public Evidence API (for trusted contacts via email link) ─────────
+  app.get("/api/sos/evidence/:token", (req: Request, res: Response) => {
+    try {
+      const { token } = req.params;
+      const sessionRow = db
+        .prepare(
+          `SELECT l.user_id, l.share_token, u.username
+           FROM sos_logs l
+           JOIN users u ON u.id = l.user_id
+           WHERE l.share_token = ?
+           ORDER BY l.created_at DESC LIMIT 1`
+        )
+        .get(token) as { user_id: number; share_token: string; username: string } | undefined;
+
+      if (!sessionRow) {
+        return res.status(404).json({ error: "Evidence not found or link expired" });
+      }
+
+      const logs = db
+        .prepare(
+          `SELECT encrypted_coords, audio_url, status, trigger_method,
+           strftime('%Y-%m-%dT%H:%M:%SZ', created_at) as created_at
+           FROM sos_logs WHERE share_token = ? ORDER BY created_at ASC`
+        )
+        .all(token) as any[];
+
+      const locations: { latitude: number; longitude: number; time: string; triggerMethod: string }[] = [];
+      const audioChunks: { url: string; time: string }[] = [];
+      let primaryTrigger = "DURESS_PIN";
+
+      for (const log of logs) {
+        if (log.encrypted_coords) {
+          const coords = decryptCoords(log.encrypted_coords);
+          if (coords) {
+            locations.push({
+              latitude: coords.lat,
+              longitude: coords.lng,
+              time: log.created_at,
+              triggerMethod: log.trigger_method,
+            });
+            if (log.trigger_method !== "INTERVAL") {
+              primaryTrigger = log.trigger_method;
+            }
+          }
+        }
+        if (log.status === "AUDIO_CHUNK" && log.audio_url) {
+          audioChunks.push({ url: log.audio_url, time: log.created_at });
+        }
+      }
+
+      const latest = locations[locations.length - 1];
+
+      res.json({
+        username: sessionRow.username,
+        triggerMethod: primaryTrigger,
+        triggerLabel: formatTriggerMethod(primaryTrigger),
+        latestLocation: latest ?? null,
+        locations,
+        audioChunks,
+        mapsUrl: latest
+          ? `https://maps.google.com/?q=${latest.latitude},${latest.longitude}`
+          : null,
+      });
+    } catch (err: any) {
+      console.error("Evidence fetch error:", err);
+      res.status(500).json({ error: "Failed to load evidence" });
+    }
+  });
+
+  // ─── Public Evidence Page (linked from emergency emails) ───────────────
+  app.get("/evidence/:token", (req: Request, res: Response) => {
+    const { token } = req.params;
+    res.setHeader("Content-Type", "text/html");
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Silent Signal — Emergency Evidence</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; background: #0f0f0f; color: #fff; margin: 0; padding: 20px; }
+    .container { max-width: 640px; margin: 0 auto; }
+    .alert-banner { background: #dc2626; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
+    .alert-banner h1 { margin: 0 0 8px; font-size: 22px; }
+    .card { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    .card h2 { margin: 0 0 12px; font-size: 16px; color: #f87171; text-transform: uppercase; letter-spacing: 1px; }
+    .value { font-size: 18px; font-weight: bold; }
+    .mono { font-family: monospace; font-size: 14px; color: #ccc; }
+    .btn { display: block; text-align: center; background: #dc2626; color: #fff; text-decoration: none; padding: 14px; border-radius: 8px; font-weight: bold; margin-top: 12px; }
+    audio { width: 100%; margin-top: 8px; }
+    .audio-item { background: #111; border-radius: 8px; padding: 12px; margin-top: 10px; }
+    .time { font-size: 12px; color: #888; margin-bottom: 6px; }
+    .loading { text-align: center; color: #888; padding: 40px; }
+    .refresh-note { font-size: 12px; color: #666; text-align: center; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="alert-banner">
+      <h1>🚨 Emergency Evidence</h1>
+      <p style="margin:0;opacity:0.9;">Silent Signal — Live SOS data for trusted contacts</p>
+    </div>
+    <div id="content" class="loading">Loading evidence...</div>
+    <p class="refresh-note">Page auto-refreshes every 15 seconds for new audio and location updates.</p>
+  </div>
+  <script>
+    const token = ${JSON.stringify(token)};
+    function formatTime(iso) {
+      try { return new Date(iso).toLocaleString(); } catch { return iso; }
+    }
+    async function loadEvidence() {
+      const el = document.getElementById("content");
+      try {
+        const res = await fetch("/api/sos/evidence/" + token);
+        if (!res.ok) { el.innerHTML = "<div class=\\"card\\"><p>Evidence not found. The link may be invalid.</p></div>"; return; }
+        const data = await res.json();
+        let html = "";
+        html += "<div class=\\"card\\"><h2>Person in danger</h2><div class=\\"value\\">" + data.username + "</div></div>";
+        html += "<div class=\\"card\\"><h2>How it was triggered</h2><div class=\\"value\\">" + data.triggerLabel + "</div></div>";
+        if (data.latestLocation) {
+          const loc = data.latestLocation;
+          html += "<div class=\\"card\\"><h2>Latest location</h2>";
+          html += "<div class=\\"mono\\">" + loc.latitude.toFixed(6) + ", " + loc.longitude.toFixed(6) + "</div>";
+          html += "<div class=\\"time\\">Updated: " + formatTime(loc.time) + "</div>";
+          if (data.mapsUrl) html += "<a class=\\"btn\\" href=\\"" + data.mapsUrl + "\\" target=\\"_blank\\">📍 Open in Google Maps</a>";
+          html += "</div>";
+        }
+        html += "<div class=\\"card\\"><h2>Recorded audio (" + data.audioChunks.length + ")</h2>";
+        if (data.audioChunks.length === 0) {
+          html += "<p style=\\"color:#888\\">No audio yet. Recording starts automatically — check back in 10–30 seconds.</p>";
+        } else {
+          data.audioChunks.forEach(function(chunk, i) {
+            html += "<div class=\\"audio-item\\"><div class=\\"time\\">Recording " + (i + 1) + " — " + formatTime(chunk.time) + "</div>";
+            html += "<audio controls src=\\"" + chunk.url + "\\"></audio></div>";
+          });
+        }
+        html += "</div>";
+        el.innerHTML = html;
+      } catch (e) {
+        el.innerHTML = "<div class=\\"card\\"><p>Failed to load evidence. Please try again.</p></div>";
+      }
+    }
+    loadEvidence();
+    setInterval(loadEvidence, 15000);
+  </script>
+</body>
+</html>`);
   });
 
   // ─── Alert Config Status ───────────────────────────────────────────────
