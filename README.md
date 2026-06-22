@@ -60,4 +60,4 @@
 
 ---
 
-*Built for National Hackathon 2026 by Team INGENIOUS.*
+
