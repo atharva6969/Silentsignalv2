@@ -1,42 +1,67 @@
-# Silent Signal — Stealth Emergency Alert System
+# Silent Signal
 
-**Silent Signal** is a high-stakes safety application designed for situations where a victim cannot openly call for help. It uses a "Duress PIN" system to silently trigger emergency protocols while maintaining a decoy interface to avoid detection by a perpetrator.
+Silent Signal is a stealth-oriented emergency alert system designed for situations where a user cannot safely ask for help out loud. The app disguises itself as a normal notes workspace while quietly collecting location and audio evidence, notifying trusted contacts, and preserving data through weak connectivity.
 
-## 🚀 Key Features
+## Current capabilities
 
-- **Multi-Modal Stealth Trigger**:
-  - **Duress PIN**: Log in with a secret secondary PIN to trigger SOS silently.
-  - **Decoy Interface**: The app transforms into a fully functional "Notes" application during an emergency.
-- **Background SOS Engine**:
-  - **Live GPS Tracking**: Continuous location sharing with trusted contacts.
-  - **Silent Audio Recording**: Captures ambient audio as evidence without any visual or audible indicators.
-- **Privacy-First Architecture**:
-  - **No Installation Trace**: Built as a Progressive Web App (PWA).
-  - **Encrypted Storage**: All evidence and contact data are stored securely.
-- **Zero Notification Leak**: Suppresses all system notifications and sounds during an active SOS.
+- JWT-authenticated API flow with duress-PIN login support
+- Login and SOS endpoint rate limiting
+- Alternate triggers: gesture pattern, shake gesture, whispered safe word, and a browser-level power-button style visibility sequence
+- Auto-expiring evidence links for trusted contacts
+- Offline GPS queue with reconnect flush using batched uploads
+- Throttled GPS polling when the device appears stationary
+- Chunked audio uploads every 30 seconds
+- PWA caching for faster decoy UI startup
+- AI-assisted confirmation logic that only suggests a countdown and never auto-fires SOS directly
+- AI-generated plain-English incident summaries from stored evidence
+- AI-seeded decoy notes to make the notes UI feel lived in
 
-## 🛠️ Technical Stack
+## Threat model
 
-- **Frontend**: React 19, Tailwind CSS, Motion, Lucide Icons.
-- **Backend**: Node.js (Express), SQLite (Better-SQLite3).
-- **APIs**: Geolocation API, MediaRecorder API.
+Silent Signal is meant for covert distress signaling, not for replacing emergency services or hardened native-device controls.
 
-## 📦 Setup Instructions
+### Assumptions
 
-1. **Install Dependencies**:
-   ```bash
-   npm install
-   ```
+- The user has already created an account and added trusted contacts.
+- The browser has permission to access location and microphone when needed.
+- The user can safely keep the decoy app installed as a PWA or browser tab.
+- Network connectivity may be intermittent, so evidence must survive offline periods.
 
-2. **Environment Variables**:
-   Create a `.env` file (or use the one provided in AI Studio) and set:
-   - `GEMINI_API_KEY`: For future AI-powered threat detection features.
-   - `APP_URL`: The URL where the app is hosted.
+### Defenses this project now focuses on
 
-3. **Run the Application**:
-   ```bash
-   npm run dev
-   ```
+- Preventing easy account or SOS abuse with JWT auth and rate limiting
+- Keeping the decoy UI believable enough to avoid immediate suspicion
+- Preserving evidence during flaky connectivity by batching and replaying GPS uploads
+- Avoiding AI-triggered false alarms by requiring agreement across multiple signals and always using a user-cancellable countdown
+- Rotating public evidence access through expiring share links
+
+### Important limits
+
+- The "power-button" trigger is a browser approximation based on visibility changes, not true hardware-button interception.
+- Safe-word detection depends on browser speech-recognition support and can be unreliable in noisy environments.
+- This is still a web app, so OS-level stealth and background execution are weaker than a native mobile app.
+- Audio evidence is stored server-side and is not end-to-end encrypted from the server operator.
+- Duress-PIN login is intentionally immediate; other non-duress triggers use the disguised countdown to reduce false alarms.
+
+## Environment variables
+
+Configure these in `.env`:
+
+- `JWT_SECRET`: required for stable auth tokens
+- `ENCRYPTION_KEY`: 64-char hex key for encrypted GPS storage
+- `DATABASE_PATH`: optional path for the runtime SQLite DB, defaults to `data/silent_signal.db`
+- `APP_URL`: public base URL for evidence links
+- `EVIDENCE_TTL_HOURS`: expiry window for shared evidence links
+- `GEMINI_API_KEY`: optional, enables seeded decoy notes and incident reports
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`: optional SMS alerts
+- `RESEND_API_KEY` or SMTP credentials: optional email alerts
+
+## Local development
+
+```bash
+npm install
+npm run dev
+```
 
 4. **Testing the Stealth Mode**:
    - Register a new account.
@@ -60,4 +85,4 @@
 
 ---
 
-
+*Built for National Hackathon 2026 by Team INGENIOUS.*

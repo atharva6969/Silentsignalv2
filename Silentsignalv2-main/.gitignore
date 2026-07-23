@@ -7,6 +7,4 @@ coverage/
 .env*
 !.env.example
 silent_signal.db
-data/
 uploads/
-*.webm

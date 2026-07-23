@@ -1,11 +1,11 @@
-import { useState, FormEvent, useRef } from "react";
-import { User } from "../types";
+import { ReactNode, useRef, useState, FormEvent } from "react";
+import { AuthResponse } from "../types";
 import { Shield, Lock, User as UserIcon, Eye, EyeOff, ArrowRight, Grid3X3 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import GestureDetector from "./GestureDetector";
 
 interface LoginProps {
-  onLogin: (user: User) => void;
+  onLogin: (user: AuthResponse) => void;
   onTriggerSOS: () => void;
 }
 
@@ -15,78 +15,79 @@ export default function Login({ onLogin, onTriggerSOS }: LoginProps) {
   const [password, setPassword] = useState("");
   const [duressPin, setDuressPin] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPattern, setShowPattern] = useState(false);
   const [pattern, setPattern] = useState<number[]>([]);
-  const longPressTimer = useRef<NodeJS.Timeout | null>(null);
+  const longPressTimer = useRef<number | null>(null);
 
   const handleLongPressStart = () => {
-    longPressTimer.current = setTimeout(() => {
+    longPressTimer.current = window.setTimeout(() => {
       setShowPattern(true);
       if ("vibrate" in navigator) navigator.vibrate(50);
     }, 1000);
   };
 
   const handleLongPressEnd = () => {
-    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    if (longPressTimer.current) {
+      window.clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
   };
 
   const handlePatternDot = (index: number) => {
     if (pattern.includes(index)) return;
-    const newPattern = [...pattern, index];
-    setPattern(newPattern);
-    
-    // Example SOS pattern: 0-1-2 (top row)
-    if (newPattern.join("-") === "0-1-2") {
+    const nextPattern = [...pattern, index];
+    setPattern(nextPattern);
+
+    if (nextPattern.join("-") === "0-1-2") {
       onTriggerSOS();
       setShowPattern(false);
       setPattern([]);
-    } else if (newPattern.length >= 4) {
+    } else if (nextPattern.length >= 4) {
       setPattern([]);
-      setTimeout(() => setShowPattern(false), 500);
+      window.setTimeout(() => setShowPattern(false), 500);
     }
   };
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setError("");
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setMessage("");
     setLoading(true);
 
     const endpoint = isRegistering ? "/api/auth/register" : "/api/auth/login";
-    const body = isRegistering 
-      ? { username, password, duressPin } 
-      : { username, password };
+    const payload = isRegistering ? { username, password, duressPin } : { username, password };
 
     try {
-      const res = await fetch(endpoint, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       });
+      const data = await response.json().catch(() => ({}));
 
-      const data = await res.json();
-
-      if (!res.ok) {
+      if (!response.ok) {
         throw new Error(data.error || "Authentication failed");
       }
 
       if (isRegistering) {
         setIsRegistering(false);
-        setError("Registration successful! Please login.");
+        setPassword("");
+        setDuressPin("");
+        setMessage("Profile created. Sign in with your 4-digit code or duress PIN.");
       } else {
-        onLogin(data);
+        onLogin(data as AuthResponse);
       }
-    } catch (err: any) {
-      setError(err.message);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Authentication failed");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div 
-      className="min-h-screen bg-zinc-950 flex items-center justify-center p-6 font-sans overflow-hidden relative"
+    <div
+      className="relative min-h-screen overflow-hidden bg-[#0b1111] text-white"
       onMouseDown={handleLongPressStart}
       onMouseUp={handleLongPressEnd}
       onTouchStart={handleLongPressStart}
@@ -94,40 +95,44 @@ export default function Login({ onLogin, onTriggerSOS }: LoginProps) {
     >
       <GestureDetector onTrigger={onTriggerSOS} />
 
-      {/* Hidden Pattern Grid */}
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_top,rgba(45,212,191,0.14),transparent_30%),linear-gradient(180deg,#0d1515_0%,#091010_100%)]" />
+
       <AnimatePresence>
         {showPattern && (
           <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
+            initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-zinc-950/80 backdrop-blur-md"
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-lg"
           >
-            <div className="bg-zinc-900 p-8 rounded-[40px] border border-zinc-800 shadow-2xl">
-              <div className="text-center mb-6">
-                <div className="w-12 h-12 bg-red-500/20 text-red-500 rounded-xl flex items-center justify-center mx-auto mb-3">
+            <div className="rounded-[30px] border border-white/10 bg-zinc-950/92 p-8 shadow-[0_30px_120px_rgba(0,0,0,0.55)]">
+              <div className="mb-6 text-center">
+                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-red-500/20 text-red-300">
                   <Grid3X3 size={24} />
                 </div>
-                <h3 className="text-white font-bold">Emergency Override</h3>
-                <p className="text-zinc-500 text-xs mt-1">Draw the secret pattern</p>
+                <h3 className="font-semibold text-white">Emergency Override</h3>
+                <p className="mt-1 text-xs text-zinc-500">Draw the hidden pattern</p>
               </div>
               <div className="grid grid-cols-3 gap-4">
-                {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((index) => (
                   <button
-                    key={i}
-                    onMouseEnter={() => pattern.length > 0 && handlePatternDot(i)}
-                    onMouseDown={() => handlePatternDot(i)}
-                    className={`w-16 h-16 rounded-full border-2 transition-all ${
-                      pattern.includes(i) 
-                        ? "bg-red-500 border-red-400 scale-90" 
-                        : "bg-zinc-800 border-zinc-700 hover:border-zinc-500"
+                    key={index}
+                    onMouseEnter={() => pattern.length > 0 && handlePatternDot(index)}
+                    onMouseDown={() => handlePatternDot(index)}
+                    className={`h-16 w-16 rounded-full border-2 transition-all ${
+                      pattern.includes(index)
+                        ? "scale-90 border-red-300 bg-red-500"
+                        : "border-zinc-700 bg-zinc-900 hover:border-zinc-500"
                     }`}
                   />
                 ))}
               </div>
-              <button 
-                onClick={() => { setShowPattern(false); setPattern([]); }}
-                className="w-full mt-8 py-3 text-zinc-500 text-sm font-bold hover:text-white transition-colors"
+              <button
+                onClick={() => {
+                  setShowPattern(false);
+                  setPattern([]);
+                }}
+                className="mt-8 w-full rounded-2xl border border-white/10 py-3 text-sm font-semibold text-zinc-400 transition-colors hover:text-white"
               >
                 Cancel
               </button>
@@ -135,118 +140,65 @@ export default function Login({ onLogin, onTriggerSOS }: LoginProps) {
           </motion.div>
         )}
       </AnimatePresence>
-      {/* Background Decorative Elements */}
-      <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
-        <div className="absolute -top-[10%] -left-[10%] w-[40%] h-[40%] bg-emerald-500/10 rounded-full blur-[120px]" />
-        <div className="absolute -bottom-[10%] -right-[10%] w-[40%] h-[40%] bg-emerald-500/10 rounded-full blur-[120px]" />
-      </div>
 
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="w-full max-w-[1000px] grid grid-cols-1 lg:grid-cols-2 bg-zinc-900 rounded-[32px] overflow-hidden shadow-2xl border border-zinc-800 relative z-10"
-      >
-        {/* Left Side: Branding/Info */}
-        <div className="hidden lg:flex flex-col justify-between p-12 bg-gradient-to-br from-emerald-600 to-emerald-800 text-white relative overflow-hidden">
-          <div className="relative z-10">
-            <div className="w-12 h-12 bg-white/20 backdrop-blur-md rounded-xl flex items-center justify-center mb-8">
-              <Shield size={24} />
-            </div>
-            <h1 className="text-5xl font-bold tracking-tighter mb-4 leading-tight">
-              Silence is your <br />
-              <span className="text-emerald-200">strongest signal.</span>
-            </h1>
-            <p className="text-emerald-100/80 text-lg max-w-xs leading-relaxed">
-              A stealth emergency system designed for high-risk situations where every second counts.
-            </p>
-          </div>
-          
-          <div className="relative z-10">
-            <div className="flex gap-4 mb-8">
-              <div className="flex -space-x-2">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="w-8 h-8 rounded-full border-2 border-emerald-700 bg-zinc-800 flex items-center justify-center overflow-hidden">
-                    <img src={`https://picsum.photos/seed/user${i}/32/32`} alt="user" referrerPolicy="no-referrer" />
-                  </div>
-                ))}
-              </div>
-              <p className="text-sm text-emerald-100/60 flex items-center">
-                Trusted by 2,000+ users worldwide
-              </p>
-            </div>
-            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-emerald-300/50">
-              National Hackathon 2026 • Team Ingenious
-            </div>
-          </div>
-
-          {/* Abstract Pattern */}
-          <div className="absolute top-0 right-0 w-full h-full opacity-10 pointer-events-none">
-            <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
-              <defs>
-                <pattern id="grid" width="10" height="10" patternUnits="userSpaceOnUse">
-                  <path d="M 10 0 L 0 0 0 10" fill="none" stroke="white" strokeWidth="0.5"/>
-                </pattern>
-              </defs>
-              <rect width="100%" height="100%" fill="url(#grid)" />
-            </svg>
-          </div>
-        </div>
-
-        {/* Right Side: Form */}
-        <div className="p-8 lg:p-12 flex flex-col justify-center bg-zinc-900">
-          <div className="mb-8 lg:hidden flex items-center gap-3">
-            <div className="w-10 h-10 bg-emerald-600 rounded-lg flex items-center justify-center text-white">
-              <Shield size={20} />
-            </div>
-            <h2 className="text-xl font-bold text-white">Silent Signal</h2>
-          </div>
-
+      <div className="relative z-10 flex min-h-screen items-center justify-center px-6 py-12">
+        <motion.div
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md rounded-[32px] border border-white/10 bg-[#0c1216]/92 p-8 shadow-[0_24px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+        >
           <div className="mb-8">
-            <h2 className="text-3xl font-bold text-white mb-2">
-              {isRegistering ? "Create Account" : "Welcome Back"}
-            </h2>
-            <p className="text-zinc-400">
-              {isRegistering ? "Join the network of silent safety." : "Sign in to access your secure vault."}
+            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/12 text-emerald-200 ring-1 ring-white/10">
+              <Shield size={22} />
+            </div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-emerald-200/70">Silent Signal</p>
+            <h1 className="mt-3 text-3xl font-bold tracking-tight text-white">
+              {isRegistering ? "Create your access codes" : "Sign in quietly"}
+            </h1>
+            <p className="mt-3 text-sm leading-6 text-zinc-400">
+              {isRegistering
+                ? "Set one 4-digit code for normal access and one 4-digit duress PIN for silent emergency activation."
+                : "Use your 4-digit code to enter the notes workspace without making this screen feel suspicious."}
             </p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest ml-1">Username</label>
-              <div className="relative group">
-                <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 group-focus-within:text-emerald-500 transition-colors" size={18} />
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="w-full pl-12 pr-4 py-4 bg-zinc-800/50 border border-zinc-700 rounded-2xl text-white placeholder:text-zinc-600 focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 transition-all outline-none"
-                  placeholder="Your unique ID"
-                  required
-                />
-              </div>
-            </div>
+            <Field label="Username" icon={<UserIcon size={18} className="text-zinc-500" />}>
+              <input
+                type="text"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                className="h-14 w-full bg-transparent text-white outline-none placeholder:text-zinc-600"
+                placeholder="Your private ID"
+                required
+              />
+            </Field>
 
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest ml-1">Security Key</label>
-              <div className="relative group">
-                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 group-focus-within:text-emerald-500 transition-colors" size={18} />
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-12 pr-12 py-4 bg-zinc-800/50 border border-zinc-700 rounded-2xl text-white placeholder:text-zinc-600 focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 transition-all outline-none"
-                  placeholder="••••••••"
-                  required
-                />
+            <Field
+              label={isRegistering ? "4-digit passcode" : "Passcode"}
+              icon={<Lock size={18} className="text-zinc-500" />}
+              trailing={
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors"
+                  className="text-zinc-500 transition-colors hover:text-zinc-200"
                 >
                   {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
-              </div>
-            </div>
+              }
+            >
+              <input
+                type={showPassword ? "text" : "password"}
+                inputMode="numeric"
+                pattern="[0-9]{4}"
+                maxLength={4}
+                value={password}
+                onChange={(event) => setPassword(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                className="h-14 w-full bg-transparent text-white tracking-[0.4em] outline-none placeholder:text-zinc-600"
+                placeholder="0000"
+                required
+              />
+            </Field>
 
             <AnimatePresence>
               {isRegistering && (
@@ -254,63 +206,95 @@ export default function Login({ onLogin, onTriggerSOS }: LoginProps) {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: "auto" }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="space-y-2 overflow-hidden"
+                  className="space-y-5 overflow-hidden"
                 >
-                  <label className="text-xs font-bold text-red-400 uppercase tracking-widest ml-1">Duress Trigger PIN</label>
-                  <div className="relative group">
-                    <Shield className="absolute left-4 top-1/2 -translate-y-1/2 text-red-500/50 group-focus-within:text-red-500 transition-colors" size={18} />
+                  <Field label="4-digit duress PIN" icon={<Shield size={18} className="text-red-300/70" />}>
                     <input
-                      type="text"
+                      type="password"
+                      inputMode="numeric"
+                      pattern="[0-9]{4}"
+                      maxLength={4}
                       value={duressPin}
-                      onChange={(e) => setDuressPin(e.target.value)}
-                      className="w-full pl-12 pr-4 py-4 bg-red-500/5 border border-red-500/20 rounded-2xl text-white placeholder:text-zinc-600 focus:ring-2 focus:ring-red-500/50 focus:border-red-500 transition-all outline-none"
-                      placeholder="Secret SOS PIN"
+                      onChange={(event) => setDuressPin(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                      className="h-14 w-full bg-transparent text-white tracking-[0.4em] outline-none placeholder:text-zinc-600"
+                      placeholder="1111"
                       required={isRegistering}
                     />
+                  </Field>
+                  <div className="rounded-2xl border border-red-500/15 bg-red-500/8 px-4 py-3 text-sm leading-6 text-zinc-300">
+                    The duress PIN opens the normal-looking workspace while silently starting SOS capture in the background.
                   </div>
-                  <p className="text-[10px] text-zinc-500 mt-1 ml-1 leading-relaxed">
-                    <span className="text-red-400 font-bold">CRITICAL:</span> Entering this PIN instead of your password will trigger a silent SOS.
-                  </p>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {error && (
-              <motion.div 
-                initial={{ opacity: 0, y: -10 }}
+            {message && (
+              <motion.div
+                initial={{ opacity: 0, y: -8 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`p-4 rounded-2xl text-sm font-medium ${error.includes("successful") ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-red-500/10 text-red-400 border border-red-500/20"}`}
+                className={`rounded-2xl border px-4 py-3 text-sm ${
+                  message.includes("Profile")
+                    ? "border-emerald-400/20 bg-emerald-500/10 text-emerald-200"
+                    : "border-red-400/20 bg-red-500/10 text-red-200"
+                }`}
               >
-                {error}
+                {message}
               </motion.div>
             )}
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-bold transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 group disabled:opacity-50"
+              className="flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-[#1f9d7a] text-base font-bold text-white transition-all hover:bg-[#28b18a] disabled:opacity-60"
             >
               {loading ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/25 border-t-white" />
               ) : (
                 <>
-                  {isRegistering ? "Create Secure Account" : "Access Secure Vault"}
-                  <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+                  {isRegistering ? "Create profile" : "Open notes"}
+                  <ArrowRight size={18} />
                 </>
               )}
             </button>
           </form>
 
-          <div className="mt-8 text-center">
+          <div className="mt-7 flex items-center justify-between gap-4 rounded-[24px] border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-zinc-400">
+            <div>
+              <p className="font-medium text-zinc-200">{isRegistering ? "Already set up?" : "Need a new profile?"}</p>
+              <p className="mt-1 text-xs text-zinc-500">Switch modes without leaving the page.</p>
+            </div>
             <button
               onClick={() => setIsRegistering(!isRegistering)}
-              className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors font-medium"
+              className="rounded-2xl border border-white/12 px-4 py-2 font-semibold text-white transition-colors hover:bg-white/8"
             >
-              {isRegistering ? "Already protected? Sign in here" : "New to Silent Signal? Create an account"}
+              {isRegistering ? "Sign in" : "Register"}
             </button>
           </div>
-        </div>
-      </motion.div>
+        </motion.div>
+      </div>
     </div>
+  );
+}
+
+function Field({
+  label,
+  icon,
+  trailing,
+  children,
+}: {
+  label: string;
+  icon: ReactNode;
+  trailing?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block space-y-2">
+      <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-zinc-500">{label}</span>
+      <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 shadow-inner shadow-black/10 transition-colors focus-within:border-emerald-400/30 focus-within:bg-white/[0.06]">
+        {icon}
+        <div className="flex-1">{children}</div>
+        {trailing}
+      </div>
+    </label>
   );
 }

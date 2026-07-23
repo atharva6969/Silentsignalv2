@@ -1,0 +1,8 @@
+{
+  "name": "Silent Signal",
+  "description": "A stealth emergency alert system that uses duress PINs and hidden gestures to silently trigger SOS alerts, share live location, and record audio without alerting perpetrators.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}

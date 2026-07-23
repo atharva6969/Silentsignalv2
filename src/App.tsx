@@ -1,67 +1,205 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { User, Contact, Note } from "./types";
+import { User } from "./types";
 import Login from "./components/Login";
 import Dashboard from "./components/Dashboard";
+import ConfirmCountdown from "./components/ConfirmCountdown";
 import { StickyNote, LogOut } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { apiJson, apiUploadAudio } from "./lib/api";
+import { clearSession, loadSession, saveSession } from "./lib/session";
+import { enqueuePing, getQueuedPings, clearQueuedPings, QueuedPing } from "./lib/offlineQueue";
+import { useShakeDetection } from "./hooks/useShakeDetection";
+import { useSafeWordDetection } from "./hooks/useSafeWordDetection";
+import { markRecentUnlock, recordSignal } from "./lib/aiEngine";
 
-// ─── Panic Timer constants ─────────────────────────────────────────────────
-const PANIC_TIMER_SECONDS = 10; // countdown before auto-firing SOS
+const PANIC_TIMER_SECONDS = 10;
+const POWER_WINDOW_MS = 4000;
+const ACTIVE_POLL_MS = 30_000;
+const STATIONARY_POLL_MS = 60_000;
+const STATIONARY_THRESHOLD_METERS = 35;
+const AUDIO_TIMESLICE_MS = 30_000;
+const BATCH_FLUSH_MS = 45_000;
+const MAX_BATCH_SIZE = 3;
+const SAFE_WORD_KEY = "ss_safe_word";
+const AI_ENABLED_KEY = "ss_ai_enabled";
+
+type CountdownState = {
+  triggerMethod: string;
+  sourceLabel: string;
+  reason?: string;
+} | null;
+
+function haversineMeters(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number }
+): number {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const earthRadius = 6_371_000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * earthRadius * Math.asin(Math.sqrt(h));
+}
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(() => loadSession());
   const [isSOSActive, setIsSOSActive] = useState(false);
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const audioRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioStreamRef = useRef<MediaStream | null>(null);
-
-  // ─── Power Button (visibilitychange) 5x tracker ──────────────────────────
-  const powerPressTimestamps = useRef<number[]>([]);
-  const POWER_WINDOW_MS = 4000; // 5 presses within 4 seconds
-
-  // ─── Panic Timer state ───────────────────────────────────────────────────
   const [panicTimerActive, setPanicTimerActive] = useState(false);
   const [panicSecondsLeft, setPanicSecondsLeft] = useState(PANIC_TIMER_SECONDS);
-  const panicIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [countdown, setCountdown] = useState<CountdownState>(null);
+  const [safeWord, setSafeWord] = useState(() => localStorage.getItem(SAFE_WORD_KEY) || "help me now");
+  const [aiEnabled, setAiEnabled] = useState(() => localStorage.getItem(AI_ENABLED_KEY) !== "false");
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+
+  const audioRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const powerPressTimestamps = useRef<number[]>([]);
+  const panicIntervalRef = useRef<number | null>(null);
   const panicDismissed = useRef(false);
+  const gpsTimeoutRef = useRef<number | null>(null);
+  const batchFlushRef = useRef<number | null>(null);
+  const pendingBatchRef = useRef<QueuedPing[]>([]);
+  const lastCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+  const activeTriggerRef = useRef<{ triggerMethod: string; panicMessage?: string } | null>(null);
+  const stationaryRef = useRef(false);
 
-  // ─── Power button detection via visibilitychange ─────────────────────────
   useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        const now = Date.now();
-        powerPressTimestamps.current.push(now);
-        // Prune old timestamps outside window
-        powerPressTimestamps.current = powerPressTimestamps.current.filter(
-          (t) => now - t < POWER_WINDOW_MS
-        );
-        if (powerPressTimestamps.current.length >= 5) {
-          powerPressTimestamps.current = [];
-          console.log("[🔴 POWER BUTTON] 5x press detected — arming panic timer");
-          // Arm the panic timer (fires when screen comes back visible)
-          panicDismissed.current = false;
-          setPanicTimerActive(true);
-          setPanicSecondsLeft(PANIC_TIMER_SECONDS);
-        }
-      }
-    };
+    localStorage.setItem(SAFE_WORD_KEY, safeWord);
+  }, [safeWord]);
 
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  useEffect(() => {
+    localStorage.setItem(AI_ENABLED_KEY, String(aiEnabled));
+  }, [aiEnabled]);
+
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
   }, []);
 
-  // ─── Panic Timer countdown ───────────────────────────────────────────────
-  useEffect(() => {
-    if (!panicTimerActive) return;
+  const flushOfflineQueue = useCallback(async () => {
+    if (!navigator.onLine || !user) return;
 
-    panicIntervalRef.current = setInterval(() => {
+    const queued = await getQueuedPings();
+    if (!queued.length) return;
+
+    try {
+      for (let i = 0; i < queued.length; i += 20) {
+        const chunk = queued.slice(i, i + 20).map(({ latitude, longitude, triggerMethod, timestamp, panicMessage }) => ({
+          latitude,
+          longitude,
+          triggerMethod,
+          timestamp,
+          panicMessage,
+        }));
+        await apiJson("/api/sos/trigger-batch", {
+          method: "POST",
+          body: JSON.stringify({ pings: chunk }),
+        });
+      }
+      await clearQueuedPings();
+    } catch (error) {
+      console.error("Failed to flush offline GPS queue", error);
+    }
+  }, [user]);
+
+  const flushBufferedPings = useCallback(async () => {
+    if (!pendingBatchRef.current.length || !user) return;
+
+    const batch = [...pendingBatchRef.current];
+    pendingBatchRef.current = [];
+
+    if (!navigator.onLine) {
+      await Promise.all(batch.map((ping) => enqueuePing(ping)));
+      return;
+    }
+
+    try {
+      await apiJson("/api/sos/trigger-batch", {
+        method: "POST",
+        body: JSON.stringify({
+          pings: batch.map(({ latitude, longitude, triggerMethod, timestamp, panicMessage }) => ({
+            latitude,
+            longitude,
+            triggerMethod,
+            timestamp,
+            panicMessage,
+          })),
+        }),
+      });
+    } catch (error) {
+      console.error("Failed to flush buffered GPS pings", error);
+      await Promise.all(batch.map((ping) => enqueuePing(ping)));
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!isOnline) return;
+    void flushBufferedPings();
+    void flushOfflineQueue();
+  }, [isOnline, flushBufferedPings, flushOfflineQueue]);
+
+  const startConfirmationCountdown = useCallback(
+    (triggerMethod: string, sourceLabel: string, reason?: string) => {
+      if (!user || isSOSActive || panicTimerActive) return;
+      panicDismissed.current = false;
+      setCountdown({ triggerMethod, sourceLabel, reason });
+      setPanicSecondsLeft(PANIC_TIMER_SECONDS);
+      setPanicTimerActive(true);
+    },
+    [isSOSActive, panicTimerActive, user]
+  );
+
+  const dismissPanicTimer = useCallback(() => {
+    panicDismissed.current = true;
+    setPanicTimerActive(false);
+    setCountdown(null);
+    if (panicIntervalRef.current) {
+      window.clearInterval(panicIntervalRef.current);
+      panicIntervalRef.current = null;
+    }
+  }, []);
+
+  const fireSOS = useCallback(
+    (triggerMethod: string = "DURESS_PIN", targetUserOverride?: User, panicMessage?: string) => {
+      if (isSOSActive) return;
+      const targetUser = targetUserOverride || user;
+      if (!targetUser) return;
+
+      activeTriggerRef.current = { triggerMethod, panicMessage };
+      setIsSOSActive(true);
+      setPanicTimerActive(false);
+      setCountdown(null);
+
+      if ("vibrate" in navigator) {
+        navigator.vibrate([100, 50, 100, 50, 250]);
+      }
+    },
+    [isSOSActive, user]
+  );
+
+  useEffect(() => {
+    if (!panicTimerActive || !countdown) return;
+
+    panicIntervalRef.current = window.setInterval(() => {
       setPanicSecondsLeft((prev) => {
         if (prev <= 1) {
-          clearInterval(panicIntervalRef.current!);
+          if (panicIntervalRef.current) {
+            window.clearInterval(panicIntervalRef.current);
+            panicIntervalRef.current = null;
+          }
           setPanicTimerActive(false);
           if (!panicDismissed.current) {
-            console.log("[⏱ PANIC TIMER] Countdown elapsed — firing SOS");
-            fireSOS("PANIC_TIMER");
+            fireSOS(countdown.triggerMethod, undefined, countdown.reason);
           }
           return 0;
         }
@@ -70,96 +208,186 @@ export default function App() {
     }, 1000);
 
     return () => {
-      if (panicIntervalRef.current) clearInterval(panicIntervalRef.current);
+      if (panicIntervalRef.current) {
+        window.clearInterval(panicIntervalRef.current);
+        panicIntervalRef.current = null;
+      }
     };
-  }, [panicTimerActive]);
+  }, [countdown, fireSOS, panicTimerActive]);
 
-  const dismissPanicTimer = () => {
-    panicDismissed.current = true;
-    setPanicTimerActive(false);
-    if (panicIntervalRef.current) clearInterval(panicIntervalRef.current);
-    console.log("[⏱ PANIC TIMER] Dismissed by user");
-  };
+  const handleAiSignal = useCallback(
+    (type: "SHAKE" | "VOICE_DISTRESS" | "RAPID_MOTION" | "GESTURE") => {
+      if (!aiEnabled || !user || isSOSActive) return;
 
-  // ─── Core SOS fire function ───────────────────────────────────────────────
-  const fireSOS = useCallback(
-    (triggerMethod: string = "DURESS_PIN", targetUserOverride?: User) => {
-      // If already active, just log another ping
-      if (isSOSActive) return;
+      const outcome = recordSignal({
+        type,
+        timestamp: Date.now(),
+        confidence: type === "VOICE_DISTRESS" ? 0.92 : 0.76,
+      });
 
-      let targetUser = targetUserOverride || user;
-      if (!targetUser) {
-        // Unauthenticated quick-SOS (power button outside login)
-        targetUser = { id: 1, username: "Emergency_User", mode: "DURESS" };
-        setUser(targetUser);
+      if (outcome.shouldStartCountdown) {
+        startConfirmationCountdown("AI_SUGGESTED", "AI risk check", outcome.reason);
       }
-
-      setIsSOSActive(true);
-
-      if ("vibrate" in navigator) {
-        navigator.vibrate(
-          triggerMethod === "PANIC_TIMER"
-            ? [200, 100, 200, 100, 200, 100, 200]
-            : [100, 50, 100]
-        );
-      }
-
-      console.log(`[🚨 SOS FIRED] trigger=${triggerMethod} user=${targetUser.username}`);
     },
-    [isSOSActive, user]
+    [aiEnabled, isSOSActive, startConfirmationCountdown, user]
   );
 
-  // ─── Background SOS loop — GPS ping + audio recording ─────────────────────
+  const handleShakeTrigger = useCallback(() => {
+    handleAiSignal("SHAKE");
+    startConfirmationCountdown("SHAKE", "Shake gesture");
+  }, [handleAiSignal, startConfirmationCountdown]);
+
+  const handleSafeWordTrigger = useCallback(() => {
+    handleAiSignal("VOICE_DISTRESS");
+    startConfirmationCountdown("SAFE_WORD", "Safe word match");
+  }, [handleAiSignal, startConfirmationCountdown]);
+
+  useShakeDetection(handleShakeTrigger, Boolean(user));
+  useSafeWordDetection({
+    safeWord,
+    onDetected: handleSafeWordTrigger,
+    enabled: Boolean(user && safeWord.trim()),
+  });
+
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-
-    if (isSOSActive && user) {
-      const sendLocation = async (triggerMethod = "INTERVAL") => {
-        navigator.geolocation.getCurrentPosition(
-          async (pos) => {
-            const { latitude, longitude } = pos.coords;
-            setLocation({ lat: latitude, lng: longitude });
-            try {
-              await fetch("/api/sos/trigger", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  userId: user.id,
-                  latitude,
-                  longitude,
-                  triggerMethod,
-                  panicMessage: triggerMethod === "POWER_BUTTON_5X"
-                    ? `POWER BUTTON SOS — ${user.username} pressed power 5x`
-                    : triggerMethod === "PANIC_TIMER"
-                    ? `PANIC TIMER ELAPSED — ${user.username} did not dismiss countdown`
-                    : undefined,
-                }),
-              });
-            } catch (e) {
-              console.error("Failed to send SOS update", e);
-            }
-          },
-          (err) => console.error("Geolocation error", err),
-          { enableHighAccuracy: true }
+    const handleVisibilityChange = () => {
+      if (!user || document.visibilityState !== "hidden") return;
+      const now = Date.now();
+      powerPressTimestamps.current.push(now);
+      powerPressTimestamps.current = powerPressTimestamps.current.filter((time) => now - time < POWER_WINDOW_MS);
+      if (powerPressTimestamps.current.length >= 5) {
+        powerPressTimestamps.current = [];
+        startConfirmationCountdown(
+          "POWER_BUTTON_5X",
+          "Power-button sequence",
+          "Hardware-key style trigger pattern detected"
         );
-      };
+      }
+    };
 
-      // Determine what triggered this SOS for the first ping
-      const trigger = user.mode === "DURESS" ? "DURESS_PIN" : "MANUAL";
-      sendLocation(trigger);
-      interval = setInterval(() => sendLocation("INTERVAL"), 30000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [startConfirmationCountdown, user]);
 
-      startRecording();
-    }
+  const submitPing = useCallback(
+    async (ping: QueuedPing, immediate: boolean) => {
+      if (!user) return;
+
+      if (immediate) {
+        if (!navigator.onLine) {
+          await enqueuePing(ping);
+          return;
+        }
+
+        try {
+          await apiJson("/api/sos/trigger", {
+            method: "POST",
+            body: JSON.stringify(ping),
+          });
+        } catch (error) {
+          console.error("Failed to submit immediate SOS ping", error);
+          await enqueuePing(ping);
+        }
+        return;
+      }
+
+      pendingBatchRef.current.push(ping);
+      if (pendingBatchRef.current.length >= MAX_BATCH_SIZE) {
+        await flushBufferedPings();
+      }
+    },
+    [flushBufferedPings, user]
+  );
+
+  const captureLocation = useCallback(
+    async (triggerMethod: string, immediate: boolean, panicMessage?: string) => {
+      if (!user) return;
+
+      return new Promise<void>((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          async (position) => {
+            const nextCoords = {
+              lat: position.coords.latitude,
+              lng: position.coords.longitude,
+            };
+
+            setLocation(nextCoords);
+            if (lastCoordsRef.current) {
+              stationaryRef.current =
+                haversineMeters(lastCoordsRef.current, nextCoords) < STATIONARY_THRESHOLD_METERS;
+            }
+            lastCoordsRef.current = nextCoords;
+
+            await submitPing(
+              {
+                latitude: nextCoords.lat,
+                longitude: nextCoords.lng,
+                triggerMethod,
+                panicMessage,
+                timestamp: Date.now(),
+              },
+              immediate
+            );
+            resolve();
+          },
+          (error) => {
+            console.error("Geolocation error", error);
+            resolve();
+          },
+          { enableHighAccuracy: true, maximumAge: immediate ? 0 : 15000, timeout: 12000 }
+        );
+      });
+    },
+    [submitPing, user]
+  );
+
+  useEffect(() => {
+    if (!isSOSActive || !user) return;
+
+    let cancelled = false;
+
+    const poll = async (isInitial: boolean) => {
+      const trigger = activeTriggerRef.current?.triggerMethod || (user.mode === "DURESS" ? "DURESS_PIN" : "MANUAL");
+      const panicMessage = activeTriggerRef.current?.panicMessage;
+      await captureLocation(isInitial ? trigger : "INTERVAL", isInitial, panicMessage);
+      activeTriggerRef.current = null;
+
+      if (!cancelled) {
+        const delay = stationaryRef.current ? STATIONARY_POLL_MS : ACTIVE_POLL_MS;
+        gpsTimeoutRef.current = window.setTimeout(() => {
+          void poll(false);
+        }, delay);
+      }
+    };
+
+    void poll(true);
+    void flushOfflineQueue();
+
+    batchFlushRef.current = window.setInterval(() => {
+      void flushBufferedPings();
+      void flushOfflineQueue();
+    }, BATCH_FLUSH_MS);
+
+    void startRecording();
 
     return () => {
-      if (interval) clearInterval(interval);
+      cancelled = true;
+      if (gpsTimeoutRef.current) {
+        window.clearTimeout(gpsTimeoutRef.current);
+        gpsTimeoutRef.current = null;
+      }
+      if (batchFlushRef.current) {
+        window.clearInterval(batchFlushRef.current);
+        batchFlushRef.current = null;
+      }
+      void flushBufferedPings();
       stopRecording();
     };
-  }, [isSOSActive, user]);
+  }, [captureLocation, flushBufferedPings, flushOfflineQueue, isSOSActive, user]);
 
   const startRecording = async () => {
     if (audioStreamRef.current) return;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioStreamRef.current = stream;
@@ -167,122 +395,76 @@ export default function App() {
       audioRecorderRef.current = recorder;
 
       recorder.ondataavailable = async (event) => {
-        if (event.data.size > 0 && user) {
-          try {
-            await fetch(`/api/sos/audio?userId=${user.id}`, {
-              method: "POST",
-              headers: { "Content-Type": "audio/webm" },
-              body: event.data,
-            });
-          } catch (e) {
-            console.error("Audio upload failed", e);
+        if (event.data.size === 0 || !user) return;
+        try {
+          const response = await apiUploadAudio(event.data);
+          if (!response.ok) {
+            throw new Error(`Audio upload failed with ${response.status}`);
           }
+        } catch (error) {
+          console.error("Audio upload failed", error);
         }
       };
 
-      recorder.start(10000); // 10s chunks
-    } catch (e) {
-      console.error("Failed to start audio recording", e);
+      recorder.start(AUDIO_TIMESLICE_MS);
+    } catch (error) {
+      console.error("Failed to start audio recording", error);
     }
   };
 
   const stopRecording = () => {
-    if (audioRecorderRef.current?.state !== "inactive") {
-      audioRecorderRef.current?.stop();
+    if (audioRecorderRef.current) {
+      if (audioRecorderRef.current.state !== "inactive") {
+        audioRecorderRef.current.stop();
+      }
       audioRecorderRef.current = null;
     }
-    audioStreamRef.current?.getTracks().forEach((t) => t.stop());
+    audioStreamRef.current?.getTracks().forEach((track) => track.stop());
     audioStreamRef.current = null;
   };
 
   const stopSOS = () => {
     setIsSOSActive(false);
+    activeTriggerRef.current = null;
+    void flushBufferedPings();
     stopRecording();
   };
 
-  const handleLogin = (userData: User) => {
-    setUser(userData);
-    if (userData.mode === "DURESS") {
-      // Pass userData directly to avoid race condition with state update
-      fireSOS("DURESS_PIN", userData);
+  const handleLogin = (auth: import("./types").AuthResponse) => {
+    const nextUser: User = { id: auth.id, username: auth.username, mode: auth.mode };
+    saveSession(nextUser, auth.token);
+    markRecentUnlock();
+    setUser(nextUser);
+
+    if (auth.mode === "DURESS") {
+      fireSOS("DURESS_PIN", nextUser, "Duress login triggered emergency flow");
     }
   };
 
   const handleLogout = () => {
+    dismissPanicTimer();
     stopSOS();
+    clearSession();
     setUser(null);
+    setLocation(null);
+    lastCoordsRef.current = null;
   };
 
   const triggerEmergencySOS = () => {
-    fireSOS("GESTURE");
+    if (!user) return;
+    handleAiSignal("GESTURE");
+    startConfirmationCountdown("GESTURE", "Gesture override");
   };
-
-  // ─── Panic Timer Overlay ─────────────────────────────────────────────────
-  const PanicTimerOverlay = () => (
-    <AnimatePresence>
-      {panicTimerActive && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-zinc-950/80 backdrop-blur-md"
-        >
-          <motion.div
-            initial={{ scale: 0.85, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.85, opacity: 0 }}
-            className="bg-white rounded-[32px] p-10 max-w-sm w-full mx-4 text-center shadow-2xl border-2 border-red-200"
-          >
-            {/* Countdown ring */}
-            <div className="relative w-28 h-28 mx-auto mb-6">
-              <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
-                <circle cx="50" cy="50" r="44" fill="none" stroke="#fee2e2" strokeWidth="8" />
-                <circle
-                  cx="50" cy="50" r="44"
-                  fill="none"
-                  stroke="#ef4444"
-                  strokeWidth="8"
-                  strokeDasharray={`${2 * Math.PI * 44}`}
-                  strokeDashoffset={`${2 * Math.PI * 44 * (1 - panicSecondsLeft / PANIC_TIMER_SECONDS)}`}
-                  strokeLinecap="round"
-                  className="transition-all duration-1000"
-                />
-              </svg>
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-4xl font-black text-red-600">{panicSecondsLeft}</span>
-              </div>
-            </div>
-
-            <h2 className="text-2xl font-black text-zinc-900 mb-2">SOS Activating</h2>
-            <p className="text-zinc-500 mb-8 leading-relaxed text-sm">
-              Power button pressed 5× detected. Emergency alert will fire automatically unless dismissed.
-            </p>
-
-            <button
-              onClick={dismissPanicTimer}
-              className="w-full py-4 bg-zinc-900 text-white rounded-2xl font-black text-lg hover:bg-zinc-800 transition-colors shadow-lg"
-            >
-              I'm Safe — Cancel
-            </button>
-            <button
-              onClick={() => {
-                dismissPanicTimer();
-                fireSOS("POWER_BUTTON_5X");
-              }}
-              className="w-full mt-3 py-3 border-2 border-red-500 text-red-600 rounded-2xl font-bold hover:bg-red-50 transition-colors"
-            >
-              Send SOS Now
-            </button>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
 
   if (!user) {
     return (
       <>
-        <PanicTimerOverlay />
+        <ConfirmCountdown
+          active={panicTimerActive}
+          secondsLeft={panicSecondsLeft}
+          totalSeconds={PANIC_TIMER_SECONDS}
+          onCancel={dismissPanicTimer}
+        />
         <Login onLogin={handleLogin} onTriggerSOS={triggerEmergencySOS} />
       </>
     );
@@ -290,10 +472,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-zinc-50 font-sans text-zinc-900">
-      {/* Panic Timer overlay (works from within app too) */}
-      <PanicTimerOverlay />
+      <ConfirmCountdown
+        active={panicTimerActive}
+        secondsLeft={panicSecondsLeft}
+        totalSeconds={PANIC_TIMER_SECONDS}
+        onCancel={dismissPanicTimer}
+      />
 
-      {/* Decoy Header */}
       <header className="h-16 border-b border-zinc-200 bg-white/80 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-zinc-900 rounded-xl flex items-center justify-center text-white shadow-lg shadow-zinc-900/10">
@@ -306,10 +491,9 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Decoy sync indicator — never reveals SOS */}
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-zinc-100 rounded-full text-zinc-500 text-xs font-medium">
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            Cloud Synced
+            <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-emerald-500" : "bg-amber-500"}`} />
+            {isSOSActive ? (stationaryRef.current ? "Background Syncing" : "Live Sync Active") : isOnline ? "Cloud Synced" : "Offline Changes Saved"}
           </div>
           <button
             onClick={handleLogout}
@@ -321,7 +505,18 @@ export default function App() {
         </div>
       </header>
 
-      <Dashboard user={user} isSOSActive={isSOSActive} onStopSOS={stopSOS} />
+      <Dashboard
+        user={user}
+        isSOSActive={isSOSActive}
+        onStopSOS={stopSOS}
+        safeWord={safeWord}
+        onSafeWordChange={setSafeWord}
+        aiEnabled={aiEnabled}
+        onAiEnabledChange={setAiEnabled}
+        isOnline={isOnline}
+        latestLocation={location}
+      />
     </div>
   );
 }
+

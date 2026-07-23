@@ -1,7 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
-import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
@@ -9,20 +8,12 @@ import twilio from "twilio";
 import nodemailer from "nodemailer";
 import bcrypt from "bcrypt";
 import cors from "cors";
-import jwt from "jsonwebtoken";
-import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import "dotenv/config";
-import { seedUserNotes } from "./server/notes.ts";
-import { evaluateAiSignals, generateIncidentReport } from "./server/ai.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dataDir = path.join(__dirname, "data");
-const uploadDir = path.join(__dirname, "uploads", "evidence");
-fs.mkdirSync(dataDir, { recursive: true });
-fs.mkdirSync(uploadDir, { recursive: true });
-const db = new Database(process.env.DATABASE_PATH || path.join(dataDir, "silent_signal.db"));
+const db = new Database("silent_signal.db");
 
 // ─── Validation Utilities ─────────────────────────────────────────────────
 function validateUsername(username: string): boolean {
@@ -30,33 +21,7 @@ function validateUsername(username: string): boolean {
 }
 
 function validatePassword(password: string): boolean {
-  return typeof password === "string" && /^\d{4}$/.test(password);
-}
-
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  (() => {
-    const key = crypto.randomBytes(32).toString("hex");
-    console.warn("⚠️  JWT_SECRET not set — generated ephemeral secret (tokens invalid after restart)");
-    return key;
-  })();
-
-const JWT_EXPIRY = (process.env.JWT_EXPIRY || "7d") as jwt.SignOptions["expiresIn"];
-const EVIDENCE_TTL_HOURS = Number(process.env.EVIDENCE_TTL_HOURS) || 168;
-
-function signToken(userId: number, username: string): string {
-  return jwt.sign({ userId, username }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
-}
-
-function evidenceExpiresAt(): string {
-  const d = new Date();
-  d.setHours(d.getHours() + EVIDENCE_TTL_HOURS);
-  return d.toISOString();
-}
-
-function isEvidenceExpired(expiresAt: string | null | undefined): boolean {
-  if (!expiresAt) return false;
-  return new Date(expiresAt) < new Date();
+  return typeof password === "string" && password.length >= 4;
 }
 
 function validatePhone(phone: string): boolean {
@@ -135,14 +100,10 @@ function formatTriggerMethod(method: string): string {
   const labels: Record<string, string> = {
     DURESS_PIN: "Duress PIN login (silent emergency mode)",
     GESTURE: "Secret gesture detected",
-    SHAKE: "Device shake detected",
-    SAFE_WORD: "Safe word spoken",
-    AI_SUGGESTED: "AI-assisted confirmation (user confirmed)",
     POWER_BUTTON_5X: "Power button pressed 5 times",
     PANIC_TIMER: "Panic timer expired without dismissal",
     MANUAL: "Manual SOS activation",
     INTERVAL: "Live location update",
-    BATCH: "Queued location sync",
   };
   return labels[method] || method.replace(/_/g, " ");
 }
@@ -238,21 +199,15 @@ function buildAlertContent(
   return { smsBody, emailSubject, emailText, emailHtml };
 }
 
-function getActiveShareSession(userId: number): { share_token: string; share_expires_at: string | null } | null {
+function getActiveShareToken(userId: number): string | null {
   const row = db
     .prepare(
-      `SELECT share_token, share_expires_at FROM sos_logs
+      `SELECT share_token FROM sos_logs
        WHERE user_id = ? AND share_token IS NOT NULL
        ORDER BY created_at DESC LIMIT 1`
     )
-    .get(userId) as { share_token: string; share_expires_at: string | null } | undefined;
-  if (!row) return null;
-  if (isEvidenceExpired(row.share_expires_at)) return null;
-  return row;
-}
-
-function getActiveShareToken(userId: number): string | null {
-  return getActiveShareSession(userId)?.share_token ?? null;
+    .get(userId) as { share_token: string } | undefined;
+  return row?.share_token ?? null;
 }
 
 async function dispatchAlerts(
@@ -413,11 +368,6 @@ try {
 } catch {
   // Column already exists
 }
-try {
-  db.exec(`ALTER TABLE sos_logs ADD COLUMN share_expires_at TEXT`);
-} catch {
-  // Column already exists
-}
 
 // ─── Server ───────────────────────────────────────────────────────────────
 async function startServer() {
@@ -431,42 +381,22 @@ async function startServer() {
     credentials: true,
   }));
 
-  const loginLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many login attempts. Try again in a minute." },
-  });
-
-
-  const sosLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 30,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) => String((req as any).userId || ipKeyGenerator(req.ip || "")),
-    message: { error: "SOS rate limit exceeded. Please wait before retrying." },
-  });
-
   // ─── Authentication Middleware ──────────────────────────────────────────
   function authenticateToken(req: Request, res: Response, next: NextFunction) {
-    const authHeader = req.headers.authorization;
-    const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-    if (bearer) {
-      try {
-        const decoded = jwt.verify(bearer, JWT_SECRET) as { userId: number };
-        const user = db.prepare("SELECT id FROM users WHERE id = ?").get(decoded.userId);
-        if (!user) return res.status(403).json({ error: "Forbidden: User not found" });
-        (req as any).userId = decoded.userId;
-        return next();
-      } catch {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
+    // For development, use userId from body/query; in production use JWT tokens
+    const userId = (req.body?.userId || req.query?.userId || req.params?.userId) as string;
+    
+    if (!userId || isNaN(Number(userId))) {
+      return res.status(401).json({ error: "Unauthorized: Invalid or missing userId" });
     }
 
-    return res.status(401).json({ error: "Unauthorized: Bearer token required" });
+    const user = db.prepare("SELECT id FROM users WHERE id = ?").get(Number(userId));
+    if (!user) {
+      return res.status(403).json({ error: "Forbidden: User not found" });
+    }
+
+    (req as any).userId = Number(userId);
+    next();
   }
 
   // ─── Registration Endpoint ──────────────────────────────────────────────
@@ -479,10 +409,10 @@ async function startServer() {
         return res.status(400).json({ error: "Username must be 3-50 characters" });
       }
       if (!validatePassword(password)) {
-        return res.status(400).json({ error: "Password must be exactly 4 digits" });
+        return res.status(400).json({ error: "Password must be at least 8 characters" });
       }
       if (!validatePassword(duressPin)) {
-        return res.status(400).json({ error: "Duress PIN must be exactly 4 digits" });
+        return res.status(400).json({ error: "Duress PIN must be at least 8 characters" });
       }
 
       // Hash passwords
@@ -493,12 +423,8 @@ async function startServer() {
         "INSERT INTO users (username, password, duress_pin) VALUES (?, ?, ?)"
       ).run(username, hashedPassword, hashedDuressPin);
 
-      const userId = Number(info.lastInsertRowid);
-      await seedUserNotes(db, userId, username);
-
-      const token = signToken(userId, username);
       console.log(`[✓ REGISTER] User ${username} registered successfully`);
-      res.json({ id: userId, username, token });
+      res.json({ id: info.lastInsertRowid, username });
     } catch (err: any) {
       if (err.message.includes("UNIQUE constraint failed")) {
         return res.status(400).json({ error: "Username already exists" });
@@ -509,7 +435,7 @@ async function startServer() {
   });
 
   // ─── Login Endpoint ─────────────────────────────────────────────────────
-  app.post("/api/auth/login", loginLimiter, async (req: Request, res: Response) => {
+  app.post("/api/auth/login", async (req: Request, res: Response) => {
     try {
       const { username, password } = req.body;
 
@@ -526,16 +452,14 @@ async function startServer() {
       const passwordMatch = await bcrypt.compare(password, user.password);
       if (passwordMatch) {
         console.log(`[✓ LOGIN] User ${username} logged in normally`);
-        const token = signToken(user.id, user.username);
-        return res.json({ id: user.id, username: user.username, mode: "NORMAL", token });
+        return res.json({ id: user.id, username: user.username, mode: "NORMAL" });
       }
 
       // Check duress PIN
       const duressMatch = await bcrypt.compare(password, user.duress_pin);
       if (duressMatch) {
         console.log(`[🚨 DURESS] ${username} logged in with DURESS PIN — SOS ACTIVE`);
-        const token = signToken(user.id, user.username);
-        return res.json({ id: user.id, username: user.username, mode: "DURESS", token });
+        return res.json({ id: user.id, username: user.username, mode: "DURESS" });
       }
 
       res.status(401).json({ error: "Invalid credentials" });
@@ -546,7 +470,7 @@ async function startServer() {
   });
 
   // ─── Get Contacts ──────────────────────────────────────────────────────
-  app.get("/api/contacts", authenticateToken, (req: Request, res: Response) => {
+  app.get("/api/contacts/:userId", authenticateToken, (req: Request, res: Response) => {
     try {
       const userId = (req as any).userId;
       const contacts = db.prepare("SELECT * FROM contacts WHERE user_id = ?").all(userId);
@@ -614,7 +538,7 @@ async function startServer() {
   });
 
   // ─── SOS Trigger Endpoint ──────────────────────────────────────────────
-  app.post("/api/sos/trigger", authenticateToken, sosLimiter, async (req: Request, res: Response) => {
+  app.post("/api/sos/trigger", authenticateToken, async (req: Request, res: Response) => {
     try {
       const userId = (req as any).userId;
       const { latitude, longitude, triggerMethod, panicMessage } = req.body;
@@ -629,21 +553,16 @@ async function startServer() {
 
       const encryptedCoords = encryptCoords(latitude, longitude);
       const method = triggerMethod || "MANUAL";
-      const isNewSession = method !== "INTERVAL" && method !== "BATCH";
-      const existingSession = getActiveShareSession(userId);
+      const isNewSession = method !== "INTERVAL";
       const shareToken = isNewSession
         ? crypto.randomBytes(24).toString("hex")
-        : existingSession?.share_token || crypto.randomBytes(24).toString("hex");
-      const shareExpiresAt = isNewSession
-        ? evidenceExpiresAt()
-        : existingSession?.share_expires_at || evidenceExpiresAt();
+        : getActiveShareToken(userId) || crypto.randomBytes(24).toString("hex");
 
       const info = db
         .prepare(
-          `INSERT INTO sos_logs (user_id, encrypted_coords, status, trigger_method, share_token, share_expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          "INSERT INTO sos_logs (user_id, encrypted_coords, status, trigger_method, share_token) VALUES (?, ?, ?, ?, ?)"
         )
-        .run(userId, encryptedCoords, "ACTIVE", method, shareToken, shareExpiresAt);
+        .run(userId, encryptedCoords, "ACTIVE", method, shareToken);
 
       const contacts = db.prepare("SELECT * FROM contacts WHERE user_id = ?").all(userId) as any[];
       const user = db.prepare("SELECT username FROM users WHERE id = ?").get(userId) as any;
@@ -687,60 +606,8 @@ async function startServer() {
     }
   });
 
-  // ─── Batch SOS (offline queue flush) ───────────────────────────────────
-  app.post("/api/sos/trigger-batch", authenticateToken, sosLimiter, async (req: Request, res: Response) => {
-    try {
-      const userId = (req as any).userId;
-      const { pings } = req.body as {
-        pings: { latitude: number; longitude: number; triggerMethod?: string; timestamp?: number }[];
-      };
-
-      if (!Array.isArray(pings) || pings.length === 0) {
-        return res.status(400).json({ error: "pings array required" });
-      }
-      if (pings.length > 20) {
-        return res.status(400).json({ error: "Maximum 20 pings per batch" });
-      }
-
-      const existingSession = getActiveShareSession(userId);
-      const shareToken = existingSession?.share_token || crypto.randomBytes(24).toString("hex");
-      const shareExpiresAt = existingSession?.share_expires_at || evidenceExpiresAt();
-
-      const insert = db.prepare(
-        `INSERT INTO sos_logs (user_id, encrypted_coords, status, trigger_method, share_token, share_expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      );
-
-      for (const ping of pings) {
-        if (
-          typeof ping.latitude !== "number" ||
-          typeof ping.longitude !== "number" ||
-          ping.latitude < -90 ||
-          ping.latitude > 90 ||
-          ping.longitude < -180 ||
-          ping.longitude > 180
-        ) {
-          continue;
-        }
-        insert.run(
-          userId,
-          encryptCoords(ping.latitude, ping.longitude),
-          "ACTIVE",
-          ping.triggerMethod || "BATCH",
-          shareToken,
-          shareExpiresAt
-        );
-      }
-
-      res.json({ success: true, processed: pings.length });
-    } catch (err: any) {
-      console.error("Batch SOS error:", err);
-      res.status(500).json({ error: "Failed to process batch" });
-    }
-  });
-
   // ─── Get Notes ─────────────────────────────────────────────────────────
-  app.get("/api/notes", authenticateToken, (req: Request, res: Response) => {
+  app.get("/api/notes/:userId", authenticateToken, (req: Request, res: Response) => {
     try {
       const userId = (req as any).userId;
       const notes = db.prepare("SELECT * FROM notes WHERE user_id = ? ORDER BY created_at DESC").all(userId);
@@ -802,44 +669,48 @@ async function startServer() {
   });
 
   // ─── Audio Upload ──────────────────────────────────────────────────────
-  app.post(
-    "/api/sos/audio",
-    authenticateToken,
-    express.raw({ type: "audio/webm", limit: "15mb" }),
-    (req: Request, res: Response) => {
-      try {
-        const userId = (req as any).userId;
-        const session = getActiveShareSession(userId);
-        const shareToken = session?.share_token ?? null;
-        const shareExpiresAt = session?.share_expires_at ?? null;
-        const filename = `${userId}-${Date.now()}-${crypto.randomUUID()}.webm`;
-        const absolutePath = path.join(uploadDir, filename);
-        fs.writeFileSync(absolutePath, req.body as Buffer);
-        const audioUrl = `/uploads/evidence/${filename}`;
+  app.post("/api/sos/audio", express.raw({ type: "audio/webm", limit: "10mb" }), (req: Request, res: Response) => {
+    try {
+      const userId = req.query.userId as string;
 
-        db.prepare(
-          `INSERT INTO sos_logs (user_id, audio_url, status, trigger_method, share_token, share_expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
-        ).run(userId, audioUrl, "AUDIO_CHUNK", "RECORDING", shareToken, shareExpiresAt);
-
-        console.log(`[AUDIO] Received audio chunk for user ${userId}`);
-        res.json({ success: true, url: audioUrl });
-      } catch (err: any) {
-        console.error("Audio upload error:", err);
-        res.status(500).json({ error: "Failed to save audio" });
+      if (!userId || isNaN(Number(userId))) {
+        return res.status(400).json({ error: "Valid userId is required" });
       }
+
+      const user = db.prepare("SELECT id FROM users WHERE id = ?").get(Number(userId));
+      if (!user) {
+        return res.status(403).json({ error: "User not found" });
+      }
+
+      const audioBase64 = (req.body as Buffer).toString("base64");
+      const shareToken = getActiveShareToken(Number(userId));
+      db.prepare(
+        "INSERT INTO sos_logs (user_id, audio_url, status, trigger_method, share_token) VALUES (?, ?, ?, ?, ?)"
+      ).run(
+        Number(userId),
+        `data:audio/webm;base64,${audioBase64}`,
+        "AUDIO_CHUNK",
+        "RECORDING",
+        shareToken
+      );
+
+      console.log(`[✓ AUDIO] Received audio chunk for user ${userId}`);
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error("Audio upload error:", err);
+      res.status(500).json({ error: "Failed to save audio" });
     }
-  );
+  });
 
   // ─── Get SOS Logs ──────────────────────────────────────────────────────
-  app.get("/api/sos/logs", authenticateToken, (req: Request, res: Response) => {
+  app.get("/api/sos/logs/:userId", authenticateToken, (req: Request, res: Response) => {
     try {
       const userId = (req as any).userId;
       console.log(`[Fetching SOS logs for user ${userId}]`);
       
       const logs = db
         .prepare(
-          `SELECT id, user_id, encrypted_coords, audio_url, status, trigger_method, share_token, share_expires_at,
+          `SELECT id, user_id, encrypted_coords, audio_url, status, trigger_method,
            strftime('%Y-%m-%dT%H:%M:%SZ', created_at) as created_at
            FROM sos_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`
         )
@@ -876,25 +747,16 @@ async function startServer() {
       const { token } = req.params;
       const sessionRow = db
         .prepare(
-          `SELECT l.user_id, l.share_token, l.share_expires_at, u.username
+          `SELECT l.user_id, l.share_token, u.username
            FROM sos_logs l
            JOIN users u ON u.id = l.user_id
            WHERE l.share_token = ?
            ORDER BY l.created_at DESC LIMIT 1`
         )
-        .get(token) as {
-          user_id: number;
-          share_token: string;
-          share_expires_at: string | null;
-          username: string;
-        } | undefined;
+        .get(token) as { user_id: number; share_token: string; username: string } | undefined;
 
       if (!sessionRow) {
         return res.status(404).json({ error: "Evidence not found or link expired" });
-      }
-
-      if (isEvidenceExpired(sessionRow.share_expires_at)) {
-        return res.status(410).json({ error: "Evidence link has expired" });
       }
 
       const logs = db
@@ -941,7 +803,6 @@ async function startServer() {
         mapsUrl: latest
           ? `https://maps.google.com/?q=${latest.latitude},${latest.longitude}`
           : null,
-        expiresAt: sessionRow.share_expires_at,
       });
     } catch (err: any) {
       console.error("Evidence fetch error:", err);
@@ -1030,80 +891,6 @@ async function startServer() {
 </html>`);
   });
 
-  // ─── AI: evaluate multi-signal (suggest-only, never auto-fire) ─────────
-  app.post("/api/ai/evaluate", authenticateToken, async (req: Request, res: Response) => {
-    try {
-      const { signals } = req.body as { signals: { type: string; confidence: number }[] };
-      if (!Array.isArray(signals)) {
-        return res.status(400).json({ error: "signals array required" });
-      }
-      const result = await evaluateAiSignals(signals);
-      res.json(result);
-    } catch (err: any) {
-      console.error("AI evaluate error:", err);
-      res.status(500).json({ error: "AI evaluation failed" });
-    }
-  });
-
-  // ─── AI: incident report for evidence token ────────────────────────────
-  app.get("/api/ai/incident-report/:token", authenticateToken, async (req: Request, res: Response) => {
-    try {
-      const userId = (req as any).userId;
-      const { token } = req.params;
-
-      const sessionRow = db
-        .prepare(
-          `SELECT user_id, share_expires_at FROM sos_logs WHERE share_token = ? AND user_id = ? LIMIT 1`
-        )
-        .get(token, userId) as { user_id: number; share_expires_at: string | null } | undefined;
-
-      if (!sessionRow) {
-        return res.status(404).json({ error: "Session not found" });
-      }
-
-      const user = db.prepare("SELECT username FROM users WHERE id = ?").get(userId) as any;
-      const logs = db
-        .prepare(
-          `SELECT encrypted_coords, audio_url, status, trigger_method, created_at
-           FROM sos_logs WHERE share_token = ? ORDER BY created_at ASC`
-        )
-        .all(token) as any[];
-
-      const locations: { latitude: number; longitude: number; time: string }[] = [];
-      let audioCount = 0;
-      let primaryTrigger = "DURESS_PIN";
-
-      for (const log of logs) {
-        if (log.encrypted_coords) {
-          const coords = decryptCoords(log.encrypted_coords);
-          if (coords) {
-            locations.push({
-              latitude: coords.lat,
-              longitude: coords.lng,
-              time: log.created_at,
-            });
-            if (log.trigger_method !== "INTERVAL" && log.trigger_method !== "BATCH") {
-              primaryTrigger = log.trigger_method;
-            }
-          }
-        }
-        if (log.status === "AUDIO_CHUNK") audioCount++;
-      }
-
-      const report = await generateIncidentReport({
-        username: user?.username || `User_${userId}`,
-        triggerLabel: formatTriggerMethod(primaryTrigger),
-        locations,
-        audioCount,
-      });
-
-      res.json({ report: report || "AI report unavailable — configure GEMINI_API_KEY" });
-    } catch (err: any) {
-      console.error("Incident report error:", err);
-      res.status(500).json({ error: "Failed to generate report" });
-    }
-  });
-
   // ─── Alert Config Status ───────────────────────────────────────────────
   app.get("/api/alerts/status", (_req: Request, res: Response) => {
     res.json({
@@ -1166,10 +953,3 @@ async function startServer() {
 }
 
 startServer().catch(console.error);
-
-
-
-
-
-
-
