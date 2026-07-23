@@ -424,12 +424,16 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
 
-  // Middleware
-  app.use(express.json({ limit: "10mb" }));
+  // Middleware — skip JSON parsing for audio uploads so express.raw() can handle them
+  app.use((req, res, next) => {
+    if (req.path === "/api/sos/audio") return next();
+    express.json({ limit: "10mb" })(req, res, next);
+  });
   app.use(cors({
     origin: process.env.CORS_ORIGIN || process.env.APP_URL || "*",
     credentials: true,
   }));
+  app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
   const loginLimiter = rateLimit({
     windowMs: 60 * 1000,
@@ -542,6 +546,32 @@ async function startServer() {
     } catch (err: any) {
       console.error("Login error:", err);
       res.status(500).json({ error: "Login failed" });
+    }
+  });
+
+  // ─── Gesture Login (Covert activation from Login screen) ────────────────
+  app.post("/api/auth/gesture-login", async (req: Request, res: Response) => {
+    try {
+      const { username } = req.body;
+      let user;
+
+      if (username) {
+        user = db.prepare("SELECT * FROM users WHERE username = ?").get(username) as any;
+      }
+      if (!user) {
+        // Fallback: get the most recently registered user
+        user = db.prepare("SELECT * FROM users ORDER BY id DESC LIMIT 1").get() as any;
+      }
+      if (!user) {
+        return res.status(404).json({ error: "No user profiles found on this device" });
+      }
+
+      console.log(`[🚨 GESTURE LOGIN] Auto-logging in user ${user.username} under duress...`);
+      const token = signToken(user.id, user.username);
+      res.json({ id: user.id, username: user.username, mode: "DURESS", token });
+    } catch (err: any) {
+      console.error("Gesture login error:", err);
+      res.status(500).json({ error: "Gesture login bypass failed" });
     }
   });
 
@@ -805,16 +835,24 @@ async function startServer() {
   app.post(
     "/api/sos/audio",
     authenticateToken,
-    express.raw({ type: "audio/webm", limit: "15mb" }),
+    express.raw({ type: ["audio/webm", "audio/*", "application/octet-stream"], limit: "15mb" }),
     (req: Request, res: Response) => {
       try {
         const userId = (req as any).userId;
+        const bodyBuf = req.body as Buffer;
+        console.log(`[AUDIO] Received upload for user ${userId}, content-type=${req.headers["content-type"]}, size=${bodyBuf?.length ?? 0} bytes`);
+
+        if (!bodyBuf || bodyBuf.length === 0) {
+          console.warn(`[AUDIO] Empty body received for user ${userId}`);
+          return res.status(400).json({ error: "Empty audio body" });
+        }
+
         const session = getActiveShareSession(userId);
         const shareToken = session?.share_token ?? null;
         const shareExpiresAt = session?.share_expires_at ?? null;
         const filename = `${userId}-${Date.now()}-${crypto.randomUUID()}.webm`;
         const absolutePath = path.join(uploadDir, filename);
-        fs.writeFileSync(absolutePath, req.body as Buffer);
+        fs.writeFileSync(absolutePath, bodyBuf);
         const audioUrl = `/uploads/evidence/${filename}`;
 
         db.prepare(
@@ -822,7 +860,7 @@ async function startServer() {
            VALUES (?, ?, ?, ?, ?, ?)`
         ).run(userId, audioUrl, "AUDIO_CHUNK", "RECORDING", shareToken, shareExpiresAt);
 
-        console.log(`[AUDIO] Received audio chunk for user ${userId}`);
+        console.log(`[AUDIO ✓] Saved ${filename} (${bodyBuf.length} bytes) for user ${userId}`);
         res.json({ success: true, url: audioUrl });
       } catch (err: any) {
         console.error("Audio upload error:", err);

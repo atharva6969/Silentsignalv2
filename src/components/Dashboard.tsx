@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Contact, Note, SosLog, User } from "../types";
-import { Plus, Search, Trash2, Shield, Settings as SettingsIcon, StickyNote, AlertCircle, History, MapPin, Mic, Menu, ChevronRight, Clock, CheckCircle2, RefreshCw, Copy, Sparkles, Wifi, WifiOff } from "lucide-react";
+import { Plus, Search, Trash2, Shield, Settings as SettingsIcon, StickyNote, AlertCircle, History, MapPin, Mic, Menu, ChevronRight, Clock, CheckCircle2, RefreshCw, Copy, Sparkles, Wifi, WifiOff, Watch, Heart } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { apiJson } from "../lib/api";
 
@@ -14,11 +14,29 @@ interface DashboardProps {
   onAiEnabledChange: (value: boolean) => void;
   isOnline: boolean;
   latestLocation: { lat: number; lng: number } | null;
+  micError?: string | null;
+  watchConnected: "NONE" | "APPLE" | "SAMSUNG";
+  onConnectWatch: (type: "NONE" | "APPLE" | "SAMSUNG") => void;
+  onSimulateWatchStress: () => void;
 }
 
 interface AlertStatus { sms: boolean; email: boolean; }
 
-export default function Dashboard({ user, isSOSActive, onStopSOS, safeWord, onSafeWordChange, aiEnabled, onAiEnabledChange, isOnline, latestLocation }: DashboardProps) {
+export default function Dashboard({
+  user,
+  isSOSActive,
+  onStopSOS,
+  safeWord,
+  onSafeWordChange,
+  aiEnabled,
+  onAiEnabledChange,
+  isOnline,
+  latestLocation,
+  micError,
+  watchConnected,
+  onConnectWatch,
+  onSimulateWatchStress
+}: DashboardProps) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [sosLogs, setSosLogs] = useState<SosLog[]>([]);
@@ -37,7 +55,16 @@ export default function Dashboard({ user, isSOSActive, onStopSOS, safeWord, onSa
   const [reportLoading, setReportLoading] = useState(false);
 
   useEffect(() => { void Promise.all([fetchNotes(), fetchContacts(), fetchAlertStatus()]); }, [user.id]);
-  useEffect(() => { if (activeTab === "logs") void fetchLogs(); }, [activeTab, user.id]);
+  useEffect(() => {
+    if (activeTab !== "logs") return;
+    void fetchLogs();
+    if (isSOSActive) {
+      const interval = setInterval(() => {
+        void fetchLogs();
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab, isSOSActive, user.id]);
 
   const fetchNotes = async () => setNotes(await apiJson<Note[]>("/api/notes").catch(() => []));
   const fetchContacts = async () => setContacts(await apiJson<Contact[]>("/api/contacts").catch(() => []));
@@ -109,8 +136,98 @@ export default function Dashboard({ user, isSOSActive, onStopSOS, safeWord, onSa
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">{filteredNotes.map((note) => <motion.div layout key={note.id} className="bg-white p-6 rounded-[24px] border border-zinc-200 shadow-sm hover:shadow-md transition-all group relative overflow-hidden"><div className="absolute top-0 left-0 w-1 h-full bg-emerald-500 opacity-0 group-hover:opacity-100 transition-opacity" /><div className="flex justify-between items-start mb-3 gap-3"><h3 className="font-serif font-bold text-lg text-zinc-900">{note.title}</h3><button onClick={() => deleteNote(note.id)} className="text-zinc-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"><Trash2 size={16} /></button></div><p className="text-zinc-500 text-sm line-clamp-4 leading-relaxed mb-6">{note.content}</p><div className="flex items-center justify-between pt-4 border-t border-zinc-50"><div className="flex items-center gap-1.5 text-[10px] font-bold text-zinc-400 uppercase tracking-widest"><Clock size={12} />{new Date(note.created_at).toLocaleDateString()}</div><CheckCircle2 size={14} className="text-emerald-500" /></div></motion.div>)}</div>
             </motion.div>}
-            {activeTab === "settings" && <motion.div key="settings" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="max-w-4xl space-y-8"><div><h2 className="text-4xl font-serif font-bold text-zinc-900">Vault Settings</h2><p className="text-zinc-500 mt-2">Manage contacts, whispered trigger phrases, and precision-first AI rules.</p></div><div className="grid grid-cols-1 lg:grid-cols-2 gap-6"><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><h3 className="font-bold text-xl text-zinc-900">Trusted Contacts</h3><form onSubmit={addContact} className="space-y-3"><input value={newContactName} onChange={(e) => setNewContactName(e.target.value)} placeholder="Contact name" className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" required /><input value={newContactPhone} onChange={(e) => setNewContactPhone(e.target.value)} placeholder="Phone number" className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" required /><input value={newContactEmail} onChange={(e) => setNewContactEmail(e.target.value)} placeholder="Email address (optional)" className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" /><button type="submit" disabled={loading} className="w-full bg-zinc-900 text-white px-8 py-3 rounded-xl font-bold disabled:opacity-50">Add Contact</button></form><div className="divide-y divide-zinc-100 rounded-2xl border border-zinc-100 overflow-hidden">{contacts.length === 0 ? <div className="p-8 text-center text-zinc-400 italic">No trusted contacts yet.</div> : contacts.map((contact) => <div key={contact.id} className="p-4 flex items-center justify-between"><div><p className="font-bold text-zinc-900">{contact.name}</p><p className="text-xs text-zinc-500">{contact.phone}{contact.email ? ` • ${contact.email}` : ""}</p></div><button onClick={() => deleteContact(contact.id)} className="p-2 text-zinc-300 hover:text-red-500"><Trash2 size={18} /></button></div>)}</div></div><div className="space-y-6"><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><h3 className="font-bold text-xl text-zinc-900">Trigger Controls</h3><div><label className="text-xs font-bold uppercase tracking-widest text-zinc-400">Whispered safe word</label><input value={safeWord} onChange={(e) => onSafeWordChange(e.target.value)} placeholder="Example: help me now" className="mt-2 w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" /><p className="text-xs text-zinc-500 mt-2">Exact-match speech detection stays local and starts the disguised countdown.</p></div><label className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-200 p-4 bg-zinc-50"><div><p className="font-bold text-zinc-900">Precision-first AI suggestions</p><p className="text-sm text-zinc-500">Only suggests countdowns after multiple signals agree. Never auto-fires SOS.</p></div><button type="button" onClick={() => onAiEnabledChange(!aiEnabled)} className={`w-14 h-8 rounded-full transition-colors ${aiEnabled ? "bg-emerald-500" : "bg-zinc-300"}`}><span className={`block w-6 h-6 bg-white rounded-full transition-transform ${aiEnabled ? "translate-x-7" : "translate-x-1"}`} /></button></label></div><div className="bg-zinc-900 p-6 rounded-[24px] text-white"><h3 className="font-bold text-lg text-emerald-400">Delivery Status</h3><div className="grid grid-cols-2 gap-3 mt-4 text-sm"><StatusPill label="SMS" value={alertStatus?.sms ? "Ready" : "Off"} /><StatusPill label="Email" value={alertStatus?.email ? "Ready" : "Off"} /><StatusPill label="Network" value={isOnline ? "Online" : "Queued"} /><StatusPill label="GPS" value={latestLocation ? "Tracking" : "Waiting"} /></div></div></div></div></motion.div>}
-            {activeTab === "logs" && <motion.div key="logs" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-8"><div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4"><div><h2 className="text-4xl font-serif font-bold text-zinc-900">Security Logs</h2><p className="text-zinc-500 mt-2">Encrypted evidence sessions, offline-replayed GPS points, and rolling audio chunks.</p></div>{isSOSActive && <button onClick={() => setShowStopConfirm(true)} className="px-6 py-2 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-all flex items-center gap-2"><Shield size={18} />Stop SOS Protocol</button>}</div><AnimatePresence>{showStopConfirm && <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/50 backdrop-blur-sm"><motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="bg-white p-8 rounded-[32px] max-w-md w-full shadow-2xl border border-zinc-200"><div className="w-16 h-16 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center mb-6"><AlertCircle size={32} /></div><h3 className="text-2xl font-bold text-zinc-900 mb-2">Deactivate SOS?</h3><p className="text-zinc-500 mb-8 leading-relaxed">This stops live tracking, chunked audio recording, and queued sync retries.</p><div className="flex gap-3"><button onClick={() => setShowStopConfirm(false)} className="flex-1 py-3 bg-zinc-100 text-zinc-600 rounded-xl font-bold">Cancel</button><button onClick={() => { onStopSOS(); setShowStopConfirm(false); }} className="flex-1 py-3 bg-red-600 text-white rounded-xl font-bold">Stop Protocol</button></div></motion.div></div>}</AnimatePresence><div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-6"><div className="space-y-4">{sosLogs.length === 0 ? <div className="bg-white p-20 rounded-[32px] border border-zinc-200 text-center space-y-4"><div className="w-16 h-16 bg-zinc-50 rounded-full flex items-center justify-center mx-auto text-zinc-300"><History size={32} /></div><p className="text-zinc-400 italic">No security logs recorded.</p></div> : sosLogs.map((log) => <motion.div key={log.id} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="bg-white p-6 rounded-[24px] border border-zinc-200 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-6"><div className="flex items-center gap-4">{log.status === "AUDIO_CHUNK" ? <div className="w-14 h-14 rounded-2xl flex items-center justify-center bg-red-50 text-red-600"><Mic size={24} /></div> : <div className="w-14 h-14 rounded-2xl flex items-center justify-center bg-blue-50 text-blue-600"><MapPin size={24} /></div>}<div><div className="font-bold text-zinc-900 text-lg">{log.status === "AUDIO_CHUNK" ? "Voice Evidence Captured" : "Location Ping Recorded"}</div><div className="flex items-center gap-2 mt-1 flex-wrap"><div className="flex items-center gap-1 text-xs font-bold text-zinc-400 uppercase tracking-widest"><Clock size={12} />{new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(log.created_at))}</div>{log.trigger_method && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider bg-zinc-100 text-zinc-500">{log.trigger_method.replace(/_/g, " ")}</span>}</div></div></div><div className="flex items-center gap-4 min-w-0">{log.status === "AUDIO_CHUNK" && log.audio_url ? <div className="bg-zinc-50 p-3 rounded-xl border border-zinc-100 min-w-[240px] max-w-[360px]"><audio controls src={log.audio_url} className="w-full" /></div> : <div className="flex items-center gap-2 bg-zinc-50 px-4 py-2 rounded-xl border border-zinc-100"><MapPin size={14} className="text-blue-500" /><span className="text-sm font-mono font-bold text-zinc-600">{log.latitude != null && log.longitude != null ? `${log.latitude.toFixed(5)}, ${log.longitude.toFixed(5)}` : "Location unavailable"}</span></div>}</div></motion.div>)}</div><div className="space-y-6"><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><div className="flex items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-widest text-zinc-400 font-bold">Trusted contact link</p><h3 className="text-xl font-bold text-zinc-900 mt-1">Auto-expiring evidence</h3></div><button onClick={copyEvidenceLink} disabled={!latestShare?.share_token} className="p-3 rounded-xl bg-zinc-900 text-white disabled:bg-zinc-200"><Copy size={16} /></button></div><div className="rounded-2xl bg-zinc-50 border border-zinc-100 px-4 py-3 text-sm font-mono text-zinc-600 break-all">{latestShare?.share_token ? `${window.location.origin}/evidence/${latestShare.share_token}` : "No active evidence session yet."}</div>{latestShare?.share_expires_at && <p className="text-xs text-zinc-500">Expires {new Date(latestShare.share_expires_at).toLocaleString()}</p>}</div><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><div className="flex items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-widest text-zinc-400 font-bold">AI report</p><h3 className="text-xl font-bold text-zinc-900 mt-1">Incident summary draft</h3></div><button onClick={generateIncidentReport} disabled={!latestShare?.share_token || reportLoading} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 text-white font-bold disabled:opacity-50"><Sparkles size={16} />{reportLoading ? "Working..." : "Generate"}</button></div><div className="rounded-2xl bg-zinc-50 border border-zinc-100 p-4 text-sm text-zinc-600 whitespace-pre-wrap min-h-40">{report || "Generate a factual plain-English incident summary from the evidence timeline."}</div></div></div></div></motion.div>}
+            {activeTab === "settings" && <motion.div key="settings" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="max-w-4xl space-y-8"><div><h2 className="text-4xl font-serif font-bold text-zinc-900">Vault Settings</h2><p className="text-zinc-500 mt-2">Manage contacts, whispered trigger phrases, and precision-first AI rules.</p></div><div className="grid grid-cols-1 lg:grid-cols-2 gap-6"><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><h3 className="font-bold text-xl text-zinc-900">Trusted Contacts</h3><form onSubmit={addContact} className="space-y-3"><input value={newContactName} onChange={(e) => setNewContactName(e.target.value)} placeholder="Contact name" className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" required /><input value={newContactPhone} onChange={(e) => setNewContactPhone(e.target.value)} placeholder="Phone number" className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" required /><input value={newContactEmail} onChange={(e) => setNewContactEmail(e.target.value)} placeholder="Email address (optional)" className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" /><button type="submit" disabled={loading} className="w-full bg-zinc-900 text-white px-8 py-3 rounded-xl font-bold disabled:opacity-50">Add Contact</button></form><div className="divide-y divide-zinc-100 rounded-2xl border border-zinc-100 overflow-hidden">{contacts.length === 0 ? <div className="p-8 text-center text-zinc-400 italic">No trusted contacts yet.</div> : contacts.map((contact) => <div key={contact.id} className="p-4 flex items-center justify-between"><div><p className="font-bold text-zinc-900">{contact.name}</p><p className="text-xs text-zinc-500">{contact.phone}{contact.email ? ` â€¢ ${contact.email}` : ""}</p></div><button onClick={() => deleteContact(contact.id)} className="p-2 text-zinc-300 hover:text-red-500"><Trash2 size={18} /></button></div>)}</div></div><div className="space-y-6"><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><h3 className="font-bold text-xl text-zinc-900">Trigger Controls</h3><div><label className="text-xs font-bold uppercase tracking-widest text-zinc-400">Whispered safe word</label><input value={safeWord} onChange={(e) => onSafeWordChange(e.target.value)} placeholder="Example: help me now" className="mt-2 w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 outline-none" /><p className="text-xs text-zinc-500 mt-2">Exact-match speech detection stays local and starts the disguised countdown.</p></div><label className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-200 p-4 bg-zinc-50"><div><p className="font-bold text-zinc-900">Precision-first AI suggestions</p><p className="text-sm text-zinc-500">Only suggests countdowns after multiple signals agree. Never auto-fires SOS.</p></div><button type="button" onClick={() => onAiEnabledChange(!aiEnabled)} className={`w-14 h-8 rounded-full transition-colors ${aiEnabled ? "bg-emerald-500" : "bg-zinc-300"}`}><span className={`block w-6 h-6 bg-white rounded-full transition-transform ${aiEnabled ? "translate-x-7" : "translate-x-1"}`} /></button></label></div>
+
+            <div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-zinc-100 rounded-xl flex items-center justify-center text-zinc-700">
+                  <Watch size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-xl text-zinc-900">Wearable Integration</h3>
+                  <p className="text-xs text-zinc-500">Apple Watch / Samsung Galaxy Watch stress spike auto-SOS.</p>
+                </div>
+              </div>
+
+              {watchConnected === "NONE" ? (
+                <div className="space-y-3 pt-2">
+                  <p className="text-xs text-zinc-500 leading-relaxed">
+                    Connect your smartwatch to automatically trigger a 5-second countdown when high stress or anxiety is detected.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => onConnectWatch("APPLE")}
+                      className="flex items-center justify-center gap-2 py-3 border border-zinc-200 hover:border-zinc-900 rounded-xl text-sm font-bold text-zinc-800 hover:bg-zinc-50 transition-all"
+                    >
+                      Connect Apple Watch
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onConnectWatch("SAMSUNG")}
+                      className="flex items-center justify-center gap-2 py-3 border border-zinc-200 hover:border-zinc-900 rounded-xl text-sm font-bold text-zinc-800 hover:bg-zinc-50 transition-all"
+                    >
+                      Connect Samsung Watch
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 pt-2">
+                  <div className="p-4 bg-zinc-50 border border-zinc-200 rounded-xl flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-sm text-zinc-900">
+                        {watchConnected === "APPLE" ? "Apple Watch Series 9" : "Galaxy Watch 6"}
+                      </p>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                        <span className="text-xs text-zinc-500 font-medium">Monitoring Stress Level</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onConnectWatch("NONE")}
+                      className="text-xs text-red-600 hover:underline font-semibold"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-zinc-50/50 p-3 rounded-xl border border-zinc-100 text-center">
+                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Heart Rate</p>
+                      <p className="text-lg font-bold text-zinc-900 mt-1 flex items-center justify-center gap-1">
+                        <Heart className="w-4 h-4 text-red-500 fill-red-500 animate-pulse" />
+                        74 bpm
+                      </p>
+                    </div>
+                    <div className="bg-zinc-50/50 p-3 rounded-xl border border-zinc-100 text-center">
+                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Stress Level</p>
+                      <p className="text-lg font-bold text-zinc-900 mt-1">Low (18%)</p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={onSimulateWatchStress}
+                    className="w-full bg-zinc-900 hover:bg-zinc-800 text-white py-3 rounded-xl font-bold text-sm transition-all"
+                  >
+                    Simulate Stress/Anxiety Spike
+                  </button>
+                </div>
+              )}
+            </div><div className="bg-zinc-900 p-6 rounded-[24px] text-white"><h3 className="font-bold text-lg text-emerald-400">Delivery Status</h3><div className="grid grid-cols-2 gap-3 mt-4 text-sm"><StatusPill label="SMS" value={alertStatus?.sms ? "Ready" : "Off"} /><StatusPill label="Email" value={alertStatus?.email ? "Ready" : "Off"} /><StatusPill label="Network" value={isOnline ? "Online" : "Queued"} /><StatusPill label="GPS" value={latestLocation ? "Tracking" : "Waiting"} /></div></div></div></div></motion.div>}
+            {activeTab === "logs" && <motion.div key="logs" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-8">
+              {micError && (
+                <div className="p-5 bg-red-50 border border-red-200 text-red-700 rounded-3xl flex items-start gap-4">
+                  <AlertCircle className="w-6 h-6 text-red-500 shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="font-bold text-base text-red-950">Audio Recording Blocked</h4>
+                    <p className="text-sm mt-1 text-red-800">{micError}</p>
+                    <p className="text-xs mt-2 text-red-600 font-medium">To enable audio evidence: Ensure you have allowed microphone permissions, and are accessing the app over a secure connection (like localhost or https://).</p>
+                  </div>
+                </div>
+              )}
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4"><div><h2 className="text-4xl font-serif font-bold text-zinc-900">Security Logs</h2><p className="text-zinc-500 mt-2">Encrypted evidence sessions, offline-replayed GPS points, and rolling audio chunks.</p></div>{isSOSActive && <button onClick={() => setShowStopConfirm(true)} className="px-6 py-2 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-all flex items-center gap-2"><Shield size={18} />Stop SOS Protocol</button>}</div><AnimatePresence>{showStopConfirm && <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/50 backdrop-blur-sm"><motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="bg-white p-8 rounded-[32px] max-w-md w-full shadow-2xl border border-zinc-200"><div className="w-16 h-16 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center mb-6"><AlertCircle size={32} /></div><h3 className="text-2xl font-bold text-zinc-900 mb-2">Deactivate SOS?</h3><p className="text-zinc-500 mb-8 leading-relaxed">This stops live tracking, chunked audio recording, and queued sync retries.</p><div className="flex gap-3"><button onClick={() => setShowStopConfirm(false)} className="flex-1 py-3 bg-zinc-100 text-zinc-600 rounded-xl font-bold">Cancel</button><button onClick={() => { onStopSOS(); setShowStopConfirm(false); }} className="flex-1 py-3 bg-red-600 text-white rounded-xl font-bold">Stop Protocol</button></div></motion.div></div>}</AnimatePresence><div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-6"><div className="space-y-4">{sosLogs.length === 0 ? <div className="bg-white p-20 rounded-[32px] border border-zinc-200 text-center space-y-4"><div className="w-16 h-16 bg-zinc-50 rounded-full flex items-center justify-center mx-auto text-zinc-300"><History size={32} /></div><p className="text-zinc-400 italic">No security logs recorded.</p></div> : sosLogs.map((log) => <motion.div key={log.id} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="bg-white p-6 rounded-[24px] border border-zinc-200 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-6"><div className="flex items-center gap-4">{log.status === "AUDIO_CHUNK" ? <div className="w-14 h-14 rounded-2xl flex items-center justify-center bg-red-50 text-red-600"><Mic size={24} /></div> : <div className="w-14 h-14 rounded-2xl flex items-center justify-center bg-blue-50 text-blue-600"><MapPin size={24} /></div>}<div><div className="font-bold text-zinc-900 text-lg">{log.status === "AUDIO_CHUNK" ? "Voice Evidence Captured" : "Location Ping Recorded"}</div><div className="flex items-center gap-2 mt-1 flex-wrap"><div className="flex items-center gap-1 text-xs font-bold text-zinc-400 uppercase tracking-widest"><Clock size={12} />{new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(log.created_at))}</div>{log.trigger_method && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider bg-zinc-100 text-zinc-500">{log.trigger_method.replace(/_/g, " ")}</span>}</div></div></div><div className="flex items-center gap-4 min-w-0">{log.status === "AUDIO_CHUNK" && log.audio_url ? <div className="bg-zinc-50 p-3 rounded-xl border border-zinc-100 min-w-[240px] max-w-[360px]"><audio controls src={log.audio_url} className="w-full" /></div> : <div className="flex items-center gap-2 bg-zinc-50 px-4 py-2 rounded-xl border border-zinc-100"><MapPin size={14} className="text-blue-500" /><span className="text-sm font-mono font-bold text-zinc-600">{log.latitude != null && log.longitude != null ? `${log.latitude.toFixed(5)}, ${log.longitude.toFixed(5)}` : "Location unavailable"}</span></div>}</div></motion.div>)}</div><div className="space-y-6"><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><div className="flex items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-widest text-zinc-400 font-bold">Trusted contact link</p><h3 className="text-xl font-bold text-zinc-900 mt-1">Auto-expiring evidence</h3></div><button onClick={copyEvidenceLink} disabled={!latestShare?.share_token} className="p-3 rounded-xl bg-zinc-900 text-white disabled:bg-zinc-200"><Copy size={16} /></button></div><div className="rounded-2xl bg-zinc-50 border border-zinc-100 px-4 py-3 text-sm font-mono text-zinc-600 break-all">{latestShare?.share_token ? `${window.location.origin}/evidence/${latestShare.share_token}` : "No active evidence session yet."}</div>{latestShare?.share_expires_at && <p className="text-xs text-zinc-500">Expires {new Date(latestShare.share_expires_at).toLocaleString()}</p>}</div><div className="bg-white rounded-[24px] border border-zinc-200 p-6 shadow-sm space-y-4"><div className="flex items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-widest text-zinc-400 font-bold">AI report</p><h3 className="text-xl font-bold text-zinc-900 mt-1">Incident summary draft</h3></div><button onClick={generateIncidentReport} disabled={!latestShare?.share_token || reportLoading} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 text-white font-bold disabled:opacity-50"><Sparkles size={16} />{reportLoading ? "Working..." : "Generate"}</button></div><div className="rounded-2xl bg-zinc-50 border border-zinc-100 p-4 text-sm text-zinc-600 whitespace-pre-wrap min-h-40">{report || "Generate a factual plain-English incident summary from the evidence timeline."}</div></div></div></div></motion.div>}
           </AnimatePresence>
         </div>
       </main>

@@ -16,7 +16,7 @@ const POWER_WINDOW_MS = 4000;
 const ACTIVE_POLL_MS = 30_000;
 const STATIONARY_POLL_MS = 60_000;
 const STATIONARY_THRESHOLD_METERS = 35;
-const AUDIO_TIMESLICE_MS = 30_000;
+const AUDIO_TIMESLICE_MS = 10_000;
 const BATCH_FLUSH_MS = 45_000;
 const MAX_BATCH_SIZE = 3;
 const SAFE_WORD_KEY = "ss_safe_word";
@@ -54,6 +54,15 @@ export default function App() {
   const [safeWord, setSafeWord] = useState(() => localStorage.getItem(SAFE_WORD_KEY) || "help me now");
   const [aiEnabled, setAiEnabled] = useState(() => localStorage.getItem(AI_ENABLED_KEY) !== "false");
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [watchConnected, setWatchConnected] = useState<"NONE" | "APPLE" | "SAMSUNG">(() => {
+    return (localStorage.getItem("ss_watch_connected") as "NONE" | "APPLE" | "SAMSUNG") || "NONE";
+  });
+
+  const connectWatch = useCallback((type: "NONE" | "APPLE" | "SAMSUNG") => {
+    setWatchConnected(type);
+    localStorage.setItem("ss_watch_connected", type);
+  }, []);
 
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
@@ -149,15 +158,25 @@ export default function App() {
   }, [isOnline, flushBufferedPings, flushOfflineQueue]);
 
   const startConfirmationCountdown = useCallback(
-    (triggerMethod: string, sourceLabel: string, reason?: string) => {
-      if (!user || isSOSActive || panicTimerActive) return;
+    (triggerMethod: string, sourceLabel: string, reason?: string, duration: number = PANIC_TIMER_SECONDS) => {
+      if (!user && triggerMethod !== "GESTURE" && triggerMethod !== "WATCH_STRESS") return;
       panicDismissed.current = false;
       setCountdown({ triggerMethod, sourceLabel, reason });
-      setPanicSecondsLeft(PANIC_TIMER_SECONDS);
+      setPanicSecondsLeft(duration);
       setPanicTimerActive(true);
     },
     [isSOSActive, panicTimerActive, user]
   );
+
+  const simulateWatchStress = useCallback(() => {
+    console.log(`[Watch] Simulating stress spike on connected device: ${watchConnected}`);
+    startConfirmationCountdown(
+      "WATCH_STRESS",
+      watchConnected === "APPLE" ? "Apple Watch sensor" : "Galaxy Watch sensor",
+      "Anxiety / stress sensor spike detected by wearable",
+      5
+    );
+  }, [watchConnected, startConfirmationCountdown]);
 
   const dismissPanicTimer = useCallback(() => {
     panicDismissed.current = true;
@@ -368,8 +387,6 @@ export default function App() {
       void flushOfflineQueue();
     }, BATCH_FLUSH_MS);
 
-    void startRecording();
-
     return () => {
       cancelled = true;
       if (gpsTimeoutRef.current) {
@@ -381,38 +398,72 @@ export default function App() {
         batchFlushRef.current = null;
       }
       void flushBufferedPings();
-      stopRecording();
     };
   }, [captureLocation, flushBufferedPings, flushOfflineQueue, isSOSActive, user]);
 
+  // Audio recording — separate effect with stable deps so it doesn't
+  // get torn down every time a GPS callback identity changes.
+  useEffect(() => {
+    if (!isSOSActive || !user) return;
+    void startRecording();
+    return () => { stopRecording(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSOSActive, user?.id]);
+
   const startRecording = async () => {
-    if (audioStreamRef.current) return;
+    if (audioStreamRef.current) {
+      console.log("[Audio] Already recording, skipping");
+      return;
+    }
 
     try {
+      console.log("[Audio] Requesting microphone access...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log("[Audio] ✅ Microphone access granted, tracks:", stream.getAudioTracks().length);
       audioStreamRef.current = stream;
-      const recorder = new MediaRecorder(stream);
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
+          : "";
+      console.log("[Audio] Using MIME type:", mimeType || "(default)");
+
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
       audioRecorderRef.current = recorder;
 
       recorder.ondataavailable = async (event) => {
+        console.log(`[Audio] ondataavailable fired, blob size: ${event.data.size} bytes`);
         if (event.data.size === 0 || !user) return;
         try {
           const response = await apiUploadAudio(event.data);
+          console.log(`[Audio] Upload response: ${response.status} ${response.statusText}`);
           if (!response.ok) {
-            throw new Error(`Audio upload failed with ${response.status}`);
+            const text = await response.text();
+            throw new Error(`Audio upload failed with ${response.status}: ${text}`);
           }
         } catch (error) {
-          console.error("Audio upload failed", error);
+          console.error("[Audio] Upload failed:", error);
         }
       };
 
+      recorder.onerror = (event) => {
+        console.error("[Audio] MediaRecorder error:", event);
+      };
+
       recorder.start(AUDIO_TIMESLICE_MS);
-    } catch (error) {
-      console.error("Failed to start audio recording", error);
+      console.log(`[Audio] ✅ Recording started, timeslice=${AUDIO_TIMESLICE_MS}ms, state=${recorder.state}`);
+      setMicError(null);
+    } catch (error: any) {
+      console.error("[Audio] ❌ Failed to start recording:", error);
+      setMicError(error.message || String(error));
     }
   };
 
   const stopRecording = () => {
+    setMicError(null);
     if (audioRecorderRef.current) {
       if (audioRecorderRef.current.state !== "inactive") {
         audioRecorderRef.current.stop();
@@ -434,6 +485,7 @@ export default function App() {
     const nextUser: User = { id: auth.id, username: auth.username, mode: auth.mode };
     saveSession(nextUser, auth.token);
     markRecentUnlock();
+    localStorage.setItem("ss_last_username", auth.username);
     setUser(nextUser);
 
     if (auth.mode === "DURESS") {
@@ -450,10 +502,30 @@ export default function App() {
     lastCoordsRef.current = null;
   };
 
-  const triggerEmergencySOS = () => {
-    if (!user) return;
-    handleAiSignal("GESTURE");
-    startConfirmationCountdown("GESTURE", "Gesture override");
+  const triggerEmergencySOS = async () => {
+    if (user) {
+      handleAiSignal("GESTURE");
+      startConfirmationCountdown("GESTURE", "Gesture override");
+      return;
+    }
+
+    try {
+      console.log("[Gesture] Triggered on login page! Attempting bypass login...");
+      const lastUsername = localStorage.getItem("ss_last_username") || "";
+      const response = await fetch("/api/auth/gesture-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: lastUsername }),
+      });
+      if (!response.ok) {
+        throw new Error(`Gesture login failed with status ${response.status}`);
+      }
+      const auth = await response.json();
+      console.log("[Gesture] Auto-login response received:", auth);
+      handleLogin(auth);
+    } catch (error) {
+      console.error("[Gesture] Auto-login failed:", error);
+    }
   };
 
   if (!user) {
@@ -515,6 +587,10 @@ export default function App() {
         onAiEnabledChange={setAiEnabled}
         isOnline={isOnline}
         latestLocation={location}
+        micError={micError}
+        watchConnected={watchConnected}
+        onConnectWatch={connectWatch}
+        onSimulateWatchStress={simulateWatchStress}
       />
     </div>
   );

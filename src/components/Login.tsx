@@ -1,6 +1,6 @@
-import { ReactNode, useRef, useState, FormEvent } from "react";
+import React, { ReactNode, useState, FormEvent } from "react";
 import { AuthResponse } from "../types";
-import { Shield, Lock, User as UserIcon, Eye, EyeOff, ArrowRight, Grid3X3 } from "lucide-react";
+import { Shield, Lock, User as UserIcon, Eye, EyeOff, ArrowRight } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import GestureDetector from "./GestureDetector";
 
@@ -17,38 +17,6 @@ export default function Login({ onLogin, onTriggerSOS }: LoginProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const [showPattern, setShowPattern] = useState(false);
-  const [pattern, setPattern] = useState<number[]>([]);
-  const longPressTimer = useRef<number | null>(null);
-
-  const handleLongPressStart = () => {
-    longPressTimer.current = window.setTimeout(() => {
-      setShowPattern(true);
-      if ("vibrate" in navigator) navigator.vibrate(50);
-    }, 1000);
-  };
-
-  const handleLongPressEnd = () => {
-    if (longPressTimer.current) {
-      window.clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
-  };
-
-  const handlePatternDot = (index: number) => {
-    if (pattern.includes(index)) return;
-    const nextPattern = [...pattern, index];
-    setPattern(nextPattern);
-
-    if (nextPattern.join("-") === "0-1-2") {
-      onTriggerSOS();
-      setShowPattern(false);
-      setPattern([]);
-    } else if (nextPattern.length >= 4) {
-      setPattern([]);
-      window.setTimeout(() => setShowPattern(false), 500);
-    }
-  };
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -86,66 +54,16 @@ export default function Login({ onLogin, onTriggerSOS }: LoginProps) {
   };
 
   return (
-    <div
-      className="relative min-h-screen overflow-hidden bg-[#0b1111] text-white"
-      onMouseDown={handleLongPressStart}
-      onMouseUp={handleLongPressEnd}
-      onTouchStart={handleLongPressStart}
-      onTouchEnd={handleLongPressEnd}
-    >
+    <div className="relative min-h-screen overflow-hidden bg-[#0b1111] text-white">
       <GestureDetector onTrigger={onTriggerSOS} />
 
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_top,rgba(45,212,191,0.14),transparent_30%),linear-gradient(180deg,#0d1515_0%,#091010_100%)]" />
 
-      <AnimatePresence>
-        {showPattern && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-lg"
-          >
-            <div className="rounded-[30px] border border-white/10 bg-zinc-950/92 p-8 shadow-[0_30px_120px_rgba(0,0,0,0.55)]">
-              <div className="mb-6 text-center">
-                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-red-500/20 text-red-300">
-                  <Grid3X3 size={24} />
-                </div>
-                <h3 className="font-semibold text-white">Emergency Override</h3>
-                <p className="mt-1 text-xs text-zinc-500">Draw the hidden pattern</p>
-              </div>
-              <div className="grid grid-cols-3 gap-4">
-                {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((index) => (
-                  <button
-                    key={index}
-                    onMouseEnter={() => pattern.length > 0 && handlePatternDot(index)}
-                    onMouseDown={() => handlePatternDot(index)}
-                    className={`h-16 w-16 rounded-full border-2 transition-all ${
-                      pattern.includes(index)
-                        ? "scale-90 border-red-300 bg-red-500"
-                        : "border-zinc-700 bg-zinc-900 hover:border-zinc-500"
-                    }`}
-                  />
-                ))}
-              </div>
-              <button
-                onClick={() => {
-                  setShowPattern(false);
-                  setPattern([]);
-                }}
-                className="mt-8 w-full rounded-2xl border border-white/10 py-3 text-sm font-semibold text-zinc-400 transition-colors hover:text-white"
-              >
-                Cancel
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div className="relative z-10 flex min-h-screen items-center justify-center px-6 py-12">
+      <div className="relative z-10 flex min-h-screen items-center justify-center px-6 py-12 pointer-events-none">
         <motion.div
           initial={{ opacity: 0, y: 18 }}
           animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md rounded-[32px] border border-white/10 bg-[#0c1216]/92 p-8 shadow-[0_24px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+          className="pointer-events-auto w-full max-w-md rounded-[32px] border border-white/10 bg-[#0c1216]/92 p-8 shadow-[0_24px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl"
         >
           <div className="mb-8">
             <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/12 text-emerald-200 ring-1 ring-white/10">
